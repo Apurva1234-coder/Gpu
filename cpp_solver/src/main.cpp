@@ -12,9 +12,11 @@
 #include "milp/BranchAndBound.hpp"
 #include "milp/CuttingPlane.hpp"
 #include "milp/FeasibilityPump.hpp"
+#include "cuda/CudaBackend.hpp"
 #include <iostream>
 using namespace sovereign;
 int main(int argc,char** argv){
+ if(argc>=2&&std::string(argv[1])=="--device-info"){std::cout<<cuda::deviceInfoText();return 0;}
  if(argc<3||std::string(argv[1])!="--input"){std::cerr<<"usage: --input <file> [--method revised-simplex|dual-simplex|ipm|qp]\n";return 2;}
  try{Model model=parseInput(argv[2]);auto cls=classify(model);auto red=Presolver{}.run(model);LPMethod method=LPMethod::RevisedSimplex;
   for(int i=3;i+1<argc;++i)if(std::string(argv[i])=="--method"){std::string x=argv[i+1];if(x=="dual-simplex")method=LPMethod::DualSimplex;else if(x=="ipm")method=LPMethod::IPM;}

@@ -173,3 +173,16 @@ Small LP, QP, and MILP fixtures are included for functional tests. The Netlib-de
 ## License
 
 No license file is currently included. Add a license before redistributing or reusing the project outside its intended scope.
+## Optional CUDA backend
+
+The CPU backend remains the default and does not require CUDA. Configure the optional NVIDIA backend with a CUDA Toolkit installation:
+
+```powershell
+cmake -S cpp_solver -B build-cuda -DSOVEREIGN_ENABLE_CUDA=ON
+cmake --build build-cuda --config Release
+build-cuda\sovereign_presolve_cli.exe --device-info
+```
+
+The backend currently provides reusable CUDA context/stream and cuBLAS operations (AXPY, dot, dense GEMV) plus CSR SpMV through the cuSPARSE Generic API. `--backend cpu|cuda|auto` is accepted as an integration setting; existing solver algorithms remain CPU-owned and CPU is the safe default. CUDA is selected automatically only for sufficiently large repeated workloads through `cuda::chooseBackend`. GPU operations keep their own explicit transfer boundary; the next integration step is passing resident device buffers through iterative solver loops.
+
+If CUDA is unavailable, configure without `SOVEREIGN_ENABLE_CUDA`; the same CLI reports `CUDA Available: NO` and all existing CPU functionality remains available. The memory/context boundary is the documented extension point for future DRGPUM integration.
