@@ -3,6 +3,7 @@
 #include "lp/Solution.hpp"
 #include "lp/Objective.hpp"
 #include "core/Tolerance.hpp"
+#include "core/numerical/Vector.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -65,10 +66,12 @@ public:
     }
 private:
     Tolerance tol_;
-    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c){double q=t[r][c];for(double&x:t[r])x/=q;for(size_t i=0;i<t.size();++i)if(i!=r){q=t[i][c];for(size_t j=0;j<t[i].size();++j)t[i][j]-=q*t[r][j];}}
+    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c){double q=t[r][c];t[r]=nla::VectorOps::scale(t[r],1.0/q);for(size_t i=0;i<t.size();++i)if(i!=r){q=t[i][c];nla::VectorOps::axpy(-q,t[r],t[i]);}}
     static double verifyResidual(const Model&m,const std::vector<double>&x){double r=0;for(auto&c:m.constraints){double a=0;for(auto p:c.coefficients)a+=p.second*x[p.first];r=std::max(r,c.relation==Relation::Equal?std::abs(a-c.rhs):c.relation==Relation::LessEqual?std::max(0.,a-c.rhs):std::max(0.,c.rhs-a));}return r;}
 };
 }
+
+
 
 
 

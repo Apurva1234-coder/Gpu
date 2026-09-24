@@ -15,6 +15,16 @@ This is an experimental project, not yet a production replacement for mature sol
 
 The current revised simplex implementation uses a dense tableau internally and is intended for small examples and development. It is not yet a sparse, large-scale revised-simplex implementation.
 
+### Numerical linear algebra (NLA)
+
+- Reusable vector operations and row-major dense matrix operations
+- CSR sparse matrix storage with `A*x` and `Aᵀ*x`
+- Partial-pivoting LU and SPD-checked Cholesky factorization
+- Dense linear and KKT solve interfaces with dimension, pivot, finiteness, and residual checks
+- Centralized numerical tolerances
+
+The LP, QP, and dual-simplex paths use the shared CPU linear-solve layer; revised simplex and Mehrotra IPM also use shared vector operations. CSR is available as a reusable primitive, while current solver model construction still uses dense working matrices in several paths.
+
 ### Quadratic programming (QP)
 
 - QP classification and Hessian convexity check
