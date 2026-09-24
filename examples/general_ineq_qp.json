@@ -1,0 +1,1 @@
+{"name":"Inequality QP","objective_sense":"minimize","variables":[{"name":"x","type":"continuous"}],"objective":{"x":-4},"quadratic_terms":{"x":2},"constraints":[{"name":"cap","coefficients":{"x":1},"operator":"<=","rhs":1}]}

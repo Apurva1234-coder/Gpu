@@ -1,0 +1,6 @@
+name: Workforce plan
+objective: minimize 10workers + 3overtime
+var workers: integer
+var overtime: continuous
+constraint: demand: workers + overtime >= 20
+bound: workers [0, inf]

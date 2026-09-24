@@ -1,0 +1,6 @@
+#pragma once
+#include <cmath>
+#include <cstddef>
+#include <unordered_map>
+#include <vector>
+namespace sovereign { class SparseMatrix { std::size_t rows_{},cols_{}; std::vector<std::unordered_map<std::size_t,double>> data_; public: SparseMatrix()=default; SparseMatrix(std::size_t r,std::size_t c):rows_(r),cols_(c),data_(r){} std::size_t rows()const{return rows_;}std::size_t cols()const{return cols_;} double get(std::size_t r,std::size_t c)const{auto it=data_.at(r).find(c);return it==data_.at(r).end()?0:it->second;} void set(std::size_t r,std::size_t c,double v){if(std::abs(v)<1e-12)data_.at(r).erase(c);else data_.at(r)[c]=v;} const std::unordered_map<std::size_t,double>& row(std::size_t r)const{return data_.at(r);} std::unordered_map<std::size_t,double>& row(std::size_t r){return data_.at(r);} std::vector<std::pair<std::size_t,double>> column(std::size_t c)const{std::vector<std::pair<std::size_t,double>>o;for(std::size_t r=0;r<rows_;++r){auto i=data_[r].find(c);if(i!=data_[r].end())o.push_back({r,i->second});}return o;} std::vector<double> multiply(const std::vector<double>&x)const{std::vector<double>y(rows_);for(std::size_t r=0;r<rows_;++r)for(auto e:data_[r])if(e.first<x.size())y[r]+=e.second*x[e.first];return y;} }; }

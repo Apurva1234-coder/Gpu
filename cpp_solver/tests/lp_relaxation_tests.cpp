@@ -1,0 +1,4 @@
+#include "milp/LPRelaxation.hpp"
+#include <cassert>
+using namespace sovereign;
+int main(){Model m;m.sense=Sense::Minimize;m.variables.push_back({0,0,"x",VariableType::Integer,0,INF,true});m.variables.push_back({1,1,"b",VariableType::Binary,0,1,true});m.objective[0]=-3;m.objective[1]=-2;Constraint c;c.name="capacity";c.coefficients[0]=2;c.coefficients[1]=2;c.relation=Relation::LessEqual;c.rhs=3;m.constraints.push_back(c);auto lp=relaxMILP(m);assert(m.variables[0].type==VariableType::Integer);assert(lp.variables[0].type==VariableType::Continuous);assert(lp.variables[1].type==VariableType::Continuous);assert(lp.variables[1].lower==0&&lp.variables[1].upper==1);assert(lp.constraints.size()==1);auto r=solveLPRelaxation(m);assert(r.status==LPStatus::Optimal);assert(r.fractionalSolution);assert(r.fractionalIntegerVariables==1);assert(r.boundType=="LOWER_BOUND");return 0;}

@@ -1,0 +1,101 @@
+"""Parser for the standard (free or fixed-column) MPS linear format."""
+from .validation import validate_payload
+
+
+def parse_mps(text: str):
+    lines = [line.rstrip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("*")]
+    if not lines or lines[0].split()[0].upper() != "NAME":
+        raise ValueError("MPS input must begin with a NAME section.")
+    section = None
+    name = lines[0].split(maxsplit=1)[1].strip() if len(lines[0].split()) > 1 else "MPS problem"
+    rows, columns, rhs, bounds = {}, {}, {}, {}
+    objective_row = None
+    integer_vars = set()
+    in_integer_block = False
+    for raw in lines[1:]:
+        tokens = raw.split()
+        head = tokens[0].upper()
+        if head in {"NAME", "ROWS", "COLUMNS", "RHS", "BOUNDS", "RANGES", "ENDATA", "OBJSENSE", "QSECTION"}:
+            section = head
+            if head == "ENDATA":
+                break
+            if head == "QSECTION":
+                raise ValueError("Quadratic MPS sections are not supported in V1.")
+            continue
+        if section == "ROWS":
+            if len(tokens) < 2 or tokens[0].upper() not in {"N", "E", "L", "G"}:
+                raise ValueError(f"Invalid MPS ROWS record: {raw.strip()}")
+            row_type, row_name = tokens[0].upper(), tokens[1]
+            rows[row_name] = row_type
+            if row_type == "N" and objective_row is None:
+                objective_row = row_name
+        elif section == "COLUMNS":
+            if len(tokens) >= 3 and tokens[1].upper() == "'MARKER'":
+                in_integer_block = "INTORG" in tokens[2].upper()
+                continue
+            if len(tokens) < 3 or (len(tokens) - 1) % 2:
+                raise ValueError(f"Invalid MPS COLUMNS record: {raw.strip()}")
+            variable = tokens[0]
+            if in_integer_block:
+                integer_vars.add(variable)
+            for index in range(1, len(tokens), 2):
+                row, value = tokens[index], _number(tokens[index + 1], raw)
+                if row not in rows:
+                    raise ValueError(f"MPS column references unknown row '{row}'.")
+                columns.setdefault(variable, {})[row] = columns.setdefault(variable, {}).get(row, 0) + value
+        elif section == "RHS":
+            _read_pairs(tokens, rhs, raw)
+        elif section == "BOUNDS":
+            if len(tokens) < 3:
+                raise ValueError(f"Invalid MPS BOUNDS record: {raw.strip()}")
+            bound_type, variable = tokens[0].upper(), tokens[2]
+            value = _number(tokens[3], raw) if len(tokens) > 3 else None
+            lower, upper = bounds.get(variable, (0.0, None))
+            if bound_type == "LO": lower = value
+            elif bound_type == "UP": upper = value
+            elif bound_type == "FX": lower = upper = value
+            elif bound_type in {"FR", "MI"}: lower = None
+            elif bound_type == "PL": upper = None
+            elif bound_type == "BV": lower, upper = 0.0, 1.0
+            else: raise ValueError(f"Unsupported MPS bound type '{bound_type}'.")
+            bounds[variable] = (lower, upper)
+        elif section == "OBJSENSE":
+            # Supported common extension: OBJSENSE followed by MAX/MIN.
+            pass
+        else:
+            raise ValueError(f"MPS record appears before a recognized section: {raw.strip()}")
+    if section != "ENDATA" or not rows or objective_row is None or not columns:
+        raise ValueError("Incomplete MPS file: NAME, ROWS, COLUMNS, and ENDATA are required.")
+    sense = "minimize"
+    for raw in lines:
+        if raw.strip().upper() in {"MAX", "MAXIMIZE"}: sense = "maximize"
+        if raw.strip().upper() in {"MIN", "MINIMIZE"}: sense = "minimize"
+    variable_names = list(columns)
+    data = {"name": name, "objective_sense": sense, "variables": [], "objective": {}, "constraints": [], "bounds": {}}
+    for variable in variable_names:
+        data["variables"].append({"name": variable, "type": "integer" if variable in integer_vars else "continuous"})
+        if variable in bounds:
+            data["bounds"][variable] = list(bounds[variable])
+        for row, coefficient in columns[variable].items():
+            if row == objective_row:
+                data["objective"][variable] = coefficient
+    for row, row_type in rows.items():
+        if row_type == "N": continue
+        operator = {"E": "=", "L": "<=", "G": ">="}[row_type]
+        coefficients = {variable: entries[row] for variable, entries in columns.items() if row in entries}
+        data["constraints"].append({"name": row, "coefficients": coefficients, "operator": operator, "rhs": rhs.get(row, 0.0)})
+    return validate_payload(data)
+
+
+def _read_pairs(tokens, target, raw):
+    if len(tokens) < 3 or (len(tokens) - 1) % 2:
+        raise ValueError(f"Invalid MPS RHS record: {raw.strip()}")
+    for index in range(1, len(tokens), 2):
+        target[tokens[index]] = _number(tokens[index + 1], raw)
+
+
+def _number(value, raw):
+    try:
+        return float(value.replace("D", "E").replace("d", "e"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid numeric value '{value}' in MPS record: {raw.strip()}") from exc

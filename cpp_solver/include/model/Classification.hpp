@@ -1,0 +1,3 @@
+#pragma once
+#include "model/Model.hpp"
+namespace sovereign { enum class ProblemType { LP, MILP, QP, MIQP }; struct Classification { ProblemType type; std::string reason; }; inline Classification classify(const Model&m){bool d=false;for(auto&v:m.variables)d|=v.type!=VariableType::Continuous;bool q=!m.quadratic.empty();if(q&&d)return{ProblemType::MIQP,"Quadratic model with integer/binary variables."};if(q)return{ProblemType::QP,"Quadratic objective with continuous variables."};if(d)return{ProblemType::MILP,"Linear model with integer/binary variables."};return{ProblemType::LP,"Linear model with continuous variables."};} }

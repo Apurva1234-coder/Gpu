@@ -1,0 +1,4 @@
+name: Bound QP
+objective: minimize -6x + 1x^2
+var x: continuous
+bound: x [2, 4]
