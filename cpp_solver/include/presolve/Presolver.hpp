@@ -73,7 +73,26 @@ private:
         std::vector<Constraint> keep; bool changed=false;
         for(auto& r:m.constraints){if(r.coefficients.empty()&&satisfies(0,r.relation,r.rhs)){h.removedConstraints.push_back({r.originalId,r.name,r.relation,r.rhs,r.coefficients});++s.redundantRows;changed=true;continue;}keep.push_back(std::move(r));}m.constraints=std::move(keep);m.rebuildMappings();return changed;
     }
-    bool singleton(Model& m, PresolveStats& s) const { bool changed=false; for(const auto& r:m.constraints) if(r.coefficients.size()==1){++s.singletonReductions;changed=true;} return changed; }
+    bool singleton(Model& m, PresolveStats& s) const {
+        bool changed=false; std::vector<Constraint> keep; keep.reserve(m.constraints.size());
+        for(auto& row:m.constraints) {
+            if(row.coefficients.size()!=1) { keep.push_back(row); continue; }
+            const auto entry=*row.coefficients.begin(); const auto index=entry.first; const double coefficient=entry.second;
+            const auto& variable=m.variables[index];
+            const double minActivity=std::abs(coefficient)<=tol_.zero?0.0:(coefficient>0?coefficient*variable.lower:coefficient*variable.upper);
+            const double maxActivity=std::abs(coefficient)<=tol_.zero?0.0:(coefficient>0?coefficient*variable.upper:coefficient*variable.lower);
+            bool implied=false;
+            if(row.relation==Relation::LessEqual) implied=maxActivity<=row.rhs+tol_.feasibility;
+            else if(row.relation==Relation::GreaterEqual) implied=minActivity>=row.rhs-tol_.feasibility;
+            else implied=std::isfinite(minActivity)&&std::isfinite(maxActivity)&&
+                         std::abs(minActivity-row.rhs)<=tol_.feasibility&&
+                         std::abs(maxActivity-row.rhs)<=tol_.feasibility;
+            if(implied) { ++s.singletonReductions; changed=true; }
+            else keep.push_back(row);
+        }
+        if(changed) { m.constraints=std::move(keep); m.rebuildMappings(); }
+        return changed;
+    }
     bool unbounded(const Model& m) const { for(auto it=m.objective.begin();it!=m.objective.end();++it){std::size_t i=it->first;double c=it->second;double direction=m.sense==Sense::Minimize?-c:c; if(direction>tol_.zero&&std::isinf(m.variables[i].upper)&&freeInRows(m,i)) return true;} return false; }
     bool freeInRows(const Model& m,std::size_t i) const { for(const auto& r:m.constraints) if(std::abs(value(r.coefficients,i))>tol_.zero)return false;return true; }
 };

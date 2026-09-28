@@ -85,7 +85,7 @@ BOUNDS
 ENDATA
 """)
         self.assertEqual(classify_model(model).problem_type, "MILP")
-        self.assertEqual(model.variables[0].type, "integer")
+        self.assertEqual(model.variables[0].type, "binary")
 
     def test_invalid_mps_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

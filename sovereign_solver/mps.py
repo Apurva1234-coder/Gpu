@@ -8,10 +8,12 @@ def parse_mps(text: str):
         raise ValueError("MPS input must begin with a NAME section.")
     section = None
     name = lines[0].split(maxsplit=1)[1].strip() if len(lines[0].split()) > 1 else "MPS problem"
-    rows, columns, rhs, bounds = {}, {}, {}, {}
+    rows, columns, rhs, ranges, bounds = {}, {}, {}, {}, {}
     objective_row = None
     integer_vars = set()
+    binary_vars = set()
     in_integer_block = False
+    rhs_set = ranges_set = bounds_set = None
     for raw in lines[1:]:
         tokens = raw.split()
         head = tokens[0].upper()
@@ -44,19 +46,39 @@ def parse_mps(text: str):
                     raise ValueError(f"MPS column references unknown row '{row}'.")
                 columns.setdefault(variable, {})[row] = columns.setdefault(variable, {}).get(row, 0) + value
         elif section == "RHS":
-            _read_pairs(tokens, rhs, raw)
+            if len(tokens) < 3:
+                raise ValueError(f"Invalid MPS RHS record: {raw.strip()}")
+            rhs_set = rhs_set or tokens[0]
+            if tokens[0] == rhs_set:
+                _read_pairs(tokens, rhs, raw)
+        elif section == "RANGES":
+            if len(tokens) < 3:
+                raise ValueError(f"Invalid MPS RANGES record: {raw.strip()}")
+            ranges_set = ranges_set or tokens[0]
+            if tokens[0] == ranges_set:
+                _read_pairs(tokens, ranges, raw)
         elif section == "BOUNDS":
             if len(tokens) < 3:
                 raise ValueError(f"Invalid MPS BOUNDS record: {raw.strip()}")
+            bounds_set = bounds_set or tokens[1]
+            if tokens[1] != bounds_set:
+                continue
             bound_type, variable = tokens[0].upper(), tokens[2]
             value = _number(tokens[3], raw) if len(tokens) > 3 else None
             lower, upper = bounds.get(variable, (0.0, None))
             if bound_type == "LO": lower = value
+            elif bound_type in {"LI", "UI"}:
+                integer_vars.add(variable)
+                if bound_type == "LI": lower = value
+                else: upper = value
             elif bound_type == "UP": upper = value
             elif bound_type == "FX": lower = upper = value
             elif bound_type in {"FR", "MI"}: lower = None
             elif bound_type == "PL": upper = None
-            elif bound_type == "BV": lower, upper = 0.0, 1.0
+            elif bound_type == "BV":
+                lower, upper = 0.0, 1.0
+                integer_vars.add(variable)
+                binary_vars.add(variable)
             else: raise ValueError(f"Unsupported MPS bound type '{bound_type}'.")
             bounds[variable] = (lower, upper)
         elif section == "OBJSENSE":
@@ -73,7 +95,8 @@ def parse_mps(text: str):
     variable_names = list(columns)
     data = {"name": name, "objective_sense": sense, "variables": [], "objective": {}, "constraints": [], "bounds": {}}
     for variable in variable_names:
-        data["variables"].append({"name": variable, "type": "integer" if variable in integer_vars else "continuous"})
+        variable_type = "binary" if variable in binary_vars else "integer" if variable in integer_vars else "continuous"
+        data["variables"].append({"name": variable, "type": variable_type})
         if variable in bounds:
             data["bounds"][variable] = list(bounds[variable])
         for row, coefficient in columns[variable].items():
@@ -83,7 +106,21 @@ def parse_mps(text: str):
         if row_type == "N": continue
         operator = {"E": "=", "L": "<=", "G": ">="}[row_type]
         coefficients = {variable: entries[row] for variable, entries in columns.items() if row in entries}
-        data["constraints"].append({"name": row, "coefficients": coefficients, "operator": operator, "rhs": rhs.get(row, 0.0)})
+        row_rhs = rhs.get(row, 0.0)
+        if row not in ranges:
+            data["constraints"].append({"name": row, "coefficients": coefficients, "operator": operator, "rhs": row_rhs})
+            continue
+        width = abs(ranges[row])
+        if operator == "L":
+            lower, upper = row_rhs, row_rhs + width
+        elif operator == "G":
+            lower, upper = row_rhs - width, row_rhs
+        elif ranges[row] >= 0:
+            lower, upper = row_rhs, row_rhs + width
+        else:
+            lower, upper = row_rhs + ranges[row], row_rhs
+        data["constraints"].append({"name": row + "_RANGE_LO", "coefficients": coefficients, "operator": ">=", "rhs": lower})
+        data["constraints"].append({"name": row + "_RANGE_UP", "coefficients": coefficients, "operator": "<=", "rhs": upper})
     return validate_payload(data)
 
 

@@ -1,0 +1,1 @@
+{"name":"Fractional MILP","objective_sense":"minimize","variables":[{"name":"x","type":"integer"},{"name":"y","type":"binary"}],"objective":{"x":-3,"y":-2},"constraints":[{"name":"capacity","coefficients":{"x":2,"y":2},"operator":"<=","rhs":3}]}

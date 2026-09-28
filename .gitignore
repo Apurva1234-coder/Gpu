@@ -5,3 +5,9 @@ venv/
 *.egg-info/
 *.exe
 /cpp_solver/build/
+/results/
+# Benchmark corpora are acquired locally and can be several gigabytes.
+/benchmarks/netlib/*.mps.txt
+/benchmarks/miplib/**/*.mps.gz
+/benchmarks/qplib/qplib/
+/benchmarks/qplib/**/*.qplib

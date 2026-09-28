@@ -1,0 +1,10 @@
+{
+  "name": "Product mix",
+  "objective_sense": "maximize",
+  "variables": [{"name": "x", "type": "continuous"}, {"name": "y", "type": "continuous"}],
+  "objective": {"x": 40, "y": 60},
+  "constraints": [
+    {"name": "labor", "coefficients": {"x": 2, "y": 4}, "operator": "<=", "rhs": 100},
+    {"name": "material", "coefficients": {"x": 3, "y": 2}, "operator": "<=", "rhs": 80}
+  ]
+}

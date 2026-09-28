@@ -1,5 +1,6 @@
 """File input layer. Detection is based on file content, never its filename."""
 import json
+import gzip
 import re
 from pathlib import Path
 from typing import Dict
@@ -9,13 +10,22 @@ from .mps import parse_mps
 
 def parse_problem_file(path: str):
     try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
+        source = Path(path)
+        opener = gzip.open if source.suffix.lower() == ".gz" else open
+        with opener(source, "rt", encoding="utf-8") as stream:
+            text = stream.read()
+    except (OSError, EOFError, UnicodeError) as exc:
         raise ValueError(f"Unable to read input file '{path}': {exc}") from exc
     if not text.strip():
         raise ValueError("Input file is empty.")
     first = next((line.strip().upper() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("*")), "")
     if first.startswith("NAME") and (first == "NAME" or first.startswith("NAME ")):
+        significant = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("*")]
+        if _looks_like_netlib_emps(significant):
+            raise ValueError(
+                "Netlib EMPS-compressed MPS is unsupported: the current decoder cannot "
+                "verify coefficient fidelity. Use a standard MPS copy; no conversion was attempted."
+            )
         return parse_mps(text)
     try:
         payload = json.loads(text)
@@ -24,6 +34,17 @@ def parse_problem_file(path: str):
     if not isinstance(payload, dict):
         raise ValueError("The input file must contain one optimization problem object.")
     return validate_payload(payload)
+
+
+def _looks_like_netlib_emps(lines: list[str]) -> bool:
+    """Identify Netlib's statistics-prefixed compressed MPS, not standard MPS."""
+    if len(lines) < 4 or not lines[0].upper().startswith("NAME"):
+        return False
+    first_stats = lines[1].split()
+    second_stats = lines[2].split()
+    return (len(first_stats) == 8 and len(second_stats) == 3
+            and all(token.isdecimal() for token in first_stats + second_stats)
+            and not any(token.upper() in {"ROWS", "COLUMNS", "RHS", "BOUNDS"} for token in lines[1:4]))
 
 
 def _parse_text(text: str) -> Dict:

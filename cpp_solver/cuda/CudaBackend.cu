@@ -10,6 +10,7 @@
 #include <memory>
 
 namespace sovereign::cuda {
+Context* Context::default_=nullptr;
 namespace {
 template<class T> class DeviceAllocation {
  public:

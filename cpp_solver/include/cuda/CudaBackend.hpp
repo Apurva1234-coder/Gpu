@@ -30,7 +30,7 @@ public:
   void spmv(const nla::CSRMatrix& A, const double* x, double* y, double alpha=1.0, double beta=0.0) const;
   bool solveDense(const nla::DenseMatrix& A, const std::vector<double>& b, std::vector<double>& x) const;
 private:
-  inline static Context* default_=nullptr;
+  static Context* default_;
   bool available_=false;
 #ifdef SOVEREIGN_HAS_CUDA
   void* stream_=nullptr; void* blas_=nullptr; void* sparse_=nullptr; void* solver_=nullptr;

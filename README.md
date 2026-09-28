@@ -161,7 +161,38 @@ python -m sovereign_solver.cli --input examples/lp.json --presolve
 
 ## Example data and benchmarking
 
-Small LP, QP, and MILP fixtures are included for functional tests. The Netlib-derived MPS files are useful parser and solver smoke tests, but this repository does not yet provide a controlled performance benchmark suite or a validated speed comparison against established solvers. Benchmark comparisons should use identical instances, hardware, tolerances, and stopping criteria.
+Small LP, QP, and MILP fixtures are included for functional tests. The Netlib-derived MPS files are useful parser and solver smoke tests. The streaming benchmark runner below provides controlled measurements when run with fixed inputs, hardware, tolerances, and stopping criteria; the included smoke data is not sufficient to claim comparative performance.
+
+### Streaming benchmark runner
+
+The benchmark runner processes one local instance at a time, calls the existing C++ solver CLI, and verifies every returned primal against the original model, including variable bounds, row feasibility, integrality, and objective value. It records unsupported inputs and failures instead of counting them as successful solves. The Python runner is independent from the solver engine; optional HiGHS comparison uses `highspy` only when installed.
+
+Build first, then run:
+
+```powershell
+python -m sovereign_solver.benchmark --dataset netlib --input benchmarks/netlib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --tier quick --time-limit 60
+python -m sovereign_solver.benchmark --dataset miplib --input benchmarks/miplib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --limit 10 --method milp --compare-highs --compare-presolve
+python -m sovereign_solver.benchmark --dataset qplib --input benchmarks/qplib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --method qp --compare-backends
+```
+
+Tiers are `quick` (up to 10 files), `standard` (up to 50), and `full` (all discovered files); `--limit N` overrides a tier. The default time limit is 60 seconds per solver invocation. Results go to `results/` by default and can be redirected with `--output-dir`. Useful options include `--method auto|revised-simplex|dual-simplex|ipm|qp|milp|lp-relaxation|cutting-plane|feasibility-pump`, `--backend cpu|cuda|auto`, `--objective-tol`, `--feasibility-tol`, `--compare-highs`, `--compare-presolve`, and `--compare-backends`. LP methods are passed as `--lp-method` within the existing branch-and-bound path for MILPs.
+
+Suggested local input layout:
+
+```text
+benchmarks/
+  netlib/{small,medium,large}/       # MPS LP instances
+  miplib/{small,medium,hard}/        # MPS MILP instances
+  qplib/{convex,semidefinite,nonconvex}/
+  mittelmann/{lp,qp,other}/
+results/                             # generated output; keep inputs separate
+```
+
+Supported model files are this project's JSON/text models and the implemented linear MPS subset (`.mps`). Gzip-compressed linear MPS (`.mps.gz`) is supported, while Netlib EMPS `.mps.txt` is explicitly rejected until its coefficient decoding can be verified. The current QP interface supports diagonal quadratic objectives in project JSON/text models; standard QPLIB and quadratic MPS encodings are not parsed and are recorded as `UNSUPPORTED` with the parser reason. Mittelmann instances are only run when they use a compatible supported input. The workspace currently contains a local standard-MPS AFIRO fixture, compressed Netlib EMPS files, and gzip MIPLIB MPS files; it contains no `.qplib` instances or compatible Mittelmann inputs. No datasets are downloaded automatically. Place locally obtained files under the corresponding family folders; do not put generated results under benchmark input trees.
+
+The runner emits class-specific LP/MILP/QP CSV and JSON, an all-instance dataset JSON, `external_solver_comparison.csv/json`, `cpu_gpu_benchmark.csv/json`, `presolve_benchmark.csv/json`, `numerical_robustness.csv/json`, and `benchmark_summary.md`. HiGHS is optional and currently compared on LP/MILP; absent HiGHS is recorded as `NOT_AVAILABLE`. CUDA is optional; unsupported methods are labeled and CPU execution continues. CUDA event timings and memory-per-process are not exposed by the current solver CLI, so those fields remain empty and are not inferred from wall-clock time.
+
+Examples available in the repository can be benchmarked immediately with `--dataset examples --input examples`. For example, the included `afiro.mps`, `lp.json`, and `milp_relaxation.json` permit a small smoke run. A timeout is recorded as `TIME_LIMIT`; an optimal status counts as a successful result only after original-model verification passes.
 
 ## Current scope
 

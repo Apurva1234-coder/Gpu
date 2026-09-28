@@ -1,5 +1,6 @@
 #include "cuda/CudaBackend.hpp"
 namespace sovereign::cuda {
+Context* Context::default_=nullptr;
 DeviceInfo deviceInfo(int){return {};}
 std::string deviceInfoText(int){return "CUDA Available: NO\nGPU Count: 0\n";}
 Context::Context(int){}
