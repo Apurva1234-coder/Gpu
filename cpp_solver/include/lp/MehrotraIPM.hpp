@@ -6,7 +6,7 @@
 namespace sovereign {
 class MehrotraIPM {
  Tolerance tol_;
- static double dot(const std::vector<double>&a,const std::vector<double>&b){return nla::VectorOps::dot(a,b);}
+ static double dot(const std::vector<double>&a,const std::vector<double>&b){auto* gpu=cuda::Context::defaultContext();return gpu&&gpu->available()?gpu->dot(a.data(),b.data(),a.size()):nla::VectorOps::dot(a,b);}
  static double norm(const std::vector<double>&a){return nla::VectorOps::norm2(a);}
  static double step(const std::vector<double>&x,const std::vector<double>&d){double a=1;for(size_t i=0;i<x.size();++i)if(d[i]<0)a=std::min(a,-x[i]/d[i]);return std::max(0.,std::min(1.,a));}
 public:

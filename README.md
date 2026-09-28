@@ -1,6 +1,6 @@
 # Sovereign Optimization Solver
 
-A CPU-based optimization solver prototype written in C++17 and Python. It includes linear-programming methods, a convex quadratic-programming path, and foundational MILP tools. The C++ solver is the main optimization executable; the Python package provides model parsing, validation, classification, and presolve utilities.
+A C++17 and Python optimization solver prototype with CPU algorithms and an optional NVIDIA CUDA numerical backend. It includes linear-programming methods, a convex quadratic-programming path, and foundational MILP tools. The C++ solver is the main optimization executable; the Python package provides model parsing, validation, classification, and presolve utilities.
 
 This is an experimental project, not yet a production replacement for mature solvers. Use the limitations below when choosing models and interpreting results. Contributions and reproducible benchmarks are welcome.
 
@@ -165,7 +165,7 @@ Small LP, QP, and MILP fixtures are included for functional tests. The Netlib-de
 
 ## Current scope
 
-- CPU only; no CUDA/GPU backend.
+- Revised and dual simplex, presolve, MILP search, cut generation, and solver control logic remain CPU implementations. CUDA accelerates supported numerical kernels in the LP/QP interior-point paths.
 - No MIQP, nonlinear optimization, branch-and-cut integration, advanced MILP cuts, parallel search, or learned methods.
 - Solver methods are prototypes; numerical robustness and scalability need further work.
 - A heuristic result is not an optimality certificate. Interpret each method's status and verification output accordingly.
@@ -183,6 +183,8 @@ cmake --build build-cuda --config Release
 build-cuda\sovereign_presolve_cli.exe --device-info
 ```
 
-The backend currently provides reusable CUDA context/stream and cuBLAS operations (AXPY, dot, dense GEMV) plus CSR SpMV through the cuSPARSE Generic API. `--backend cpu|cuda|auto` is accepted as an integration setting; existing solver algorithms remain CPU-owned and CPU is the safe default. CUDA is selected automatically only for sufficiently large repeated workloads through `cuda::chooseBackend`. GPU operations keep their own explicit transfer boundary; the next integration step is passing resident device buffers through iterative solver loops.
+The backend provides a reusable CUDA context/stream, cuBLAS AXPY/dot/dense GEMV, cuSPARSE CSR SpMV, and cuSOLVER dense LU solves. Dense KKT solves used by LP/QP interior-point methods run through cuSOLVER when CUDA is selected; equilibration, system assembly, residual checks, and the remaining solver logic run on the CPU. The current matrix/vector API transfers working data for each operation, so this is functional CUDA execution rather than a claim of end-to-end device residency or guaranteed speedup.
 
-If CUDA is unavailable, configure without `SOVEREIGN_ENABLE_CUDA`; the same CLI reports `CUDA Available: NO` and all existing CPU functionality remains available. The memory/context boundary is the documented extension point for future DRGPUM integration.
+Use `--backend cpu|cuda|auto` on solver runs. `cpu` is the default. `cuda` requires a working CUDA build and device, and `--device N` selects the NVIDIA device. `auto` selects CUDA for sufficiently large repeated interior-point workloads; simplex and other CPU-only methods stay on CPU. The CLI prints the selected numerical backend. A CUDA-enabled build requires a C++17 compiler supported by the installed CUDA Toolkit, CMake 3.16+, and NVIDIA cuBLAS, cuSPARSE, and cuSOLVER libraries.
+
+If CUDA is unavailable, configure without `SOVEREIGN_ENABLE_CUDA`; the same CLI reports `CUDA Available: NO` and all existing CPU functionality remains available.

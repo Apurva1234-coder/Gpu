@@ -1,5 +1,6 @@
 #pragma once
 #include "core/numerical/SparseMatrix.hpp"
+#include "core/numerical/DenseMatrix.hpp"
 #include "cuda/CudaError.hpp"
 #include <string>
 #include <vector>
@@ -19,15 +20,20 @@ public:
   ~Context();
   Context(const Context&)=delete;
   bool available() const { return available_; }
+  static void setDefault(Context* context) { default_=context; }
+  static Context* defaultContext() { return default_; }
   void synchronize() const;
   void axpy(double alpha, const double* x, double* y, std::size_t n) const;
   double dot(const double* x, const double* y, std::size_t n) const;
   void gemv(const double* A, std::size_t rows, std::size_t cols, const double* x, double* y) const;
+  void gemvTranspose(const double* A, std::size_t rows, std::size_t cols, const double* x, double* y) const;
   void spmv(const nla::CSRMatrix& A, const double* x, double* y, double alpha=1.0, double beta=0.0) const;
+  bool solveDense(const nla::DenseMatrix& A, const std::vector<double>& b, std::vector<double>& x) const;
 private:
+  inline static Context* default_=nullptr;
   bool available_=false;
 #ifdef SOVEREIGN_HAS_CUDA
-  void* stream_=nullptr; void* blas_=nullptr; void* sparse_=nullptr;
+  void* stream_=nullptr; void* blas_=nullptr; void* sparse_=nullptr; void* solver_=nullptr;
 #endif
 };
 

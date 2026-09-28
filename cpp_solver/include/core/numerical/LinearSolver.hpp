@@ -1,8 +1,9 @@
 #pragma once
 #include "core/numerical/Factorization.hpp"
+#include "cuda/CudaBackend.hpp"
 #include <algorithm>
 namespace sovereign::nla {
-enum class Backend { CPU };
+using Backend = cuda::Backend;
 class DenseLinearSolver {
  public: explicit DenseLinearSolver(Tolerance t={}):tol_(t){}
   bool solve(const DenseMatrix&a,const VectorOps::Vector&b,VectorOps::Vector&x)const{if(a.rows()!=b.size()||a.cols()!=b.size())return false;const size_t n=b.size();if(!std::all_of(b.begin(),b.end(),[](double v){return std::isfinite(v);}))return false;VectorOps::Vector rs(n,1),cs(n,1),rhs=b;DenseMatrix e(n,n);
@@ -18,10 +19,13 @@ class DenseLinearSolver {
     // near an LP optimum. Let the original-system residual test decide whether
     // the computed solution is useful instead of rejecting at model-scale tol.
     Tolerance factorTol=tol_;factorTol.pivot=std::min(factorTol.pivot,1e-18);factorTol.singularity=std::min(factorTol.singularity,1e-18);
-    if(!lu.factor(e,factorTol)||!lu.solve(rhs,u))return false;x.resize(n);for(size_t j=0;j<n;++j)x[j]=cs[j]*u[j];if(!std::all_of(x.begin(),x.end(),[](double v){return std::isfinite(v);}))return false;
+    auto* gpu=cuda::Context::defaultContext();
+    if(gpu&&gpu->available()){if(!gpu->solveDense(e,rhs,u))return false;}
+    else if(!lu.factor(e,factorTol)||!lu.solve(rhs,u))return false;
+    x.resize(n);for(size_t j=0;j<n;++j)x[j]=cs[j]*u[j];if(!std::all_of(x.begin(),x.end(),[](double v){return std::isfinite(v);}))return false;
     auto ax=a.multiply(x);auto r=VectorOps::subtract(ax,b);double scale=1+VectorOps::normInf(b);for(size_t i=0;i<a.rows();++i){double row=0;for(size_t j=0;j<a.cols();++j)row+=std::abs(a(i,j));scale=std::max(scale,1+row*VectorOps::normInf(x)+VectorOps::normInf(b));}return VectorOps::normInf(r)<=tol_.linearResidual*scale;}
  private:Tolerance tol_;
 };
-// Stable call boundary for future CPU/CUDA dispatch; CPU is the only backend today.
-class KKTLinearSolver {public:explicit KKTLinearSolver(Tolerance t={},Backend b=Backend::CPU):solver_(t),backend_(b){}bool solve(const DenseMatrix&a,const VectorOps::Vector&b,VectorOps::Vector&x)const{return backend_==Backend::CPU&&solver_.solve(a,b,x);}private:DenseLinearSolver solver_;Backend backend_;};
+// Numerical solves use the selected CUDA context when one is active, while retaining the CPU fallback.
+class KKTLinearSolver {public:explicit KKTLinearSolver(Tolerance t={},Backend b=Backend::CPU):solver_(t),backend_(b){}bool solve(const DenseMatrix&a,const VectorOps::Vector&b,VectorOps::Vector&x)const{if(backend_==Backend::CUDA){auto*c=cuda::Context::defaultContext();if(!c||!c->available())return false;}return solver_.solve(a,b,x);}private:DenseLinearSolver solver_;Backend backend_;};
 }
