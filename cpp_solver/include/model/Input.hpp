@@ -45,6 +45,19 @@ inline Model parseJSON(const std::string& path){
     std::string obj=section("objective");std::regex osec("\\\"objective\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch om;if(std::regex_search(s,om,osec))obj=om[1].str();std::regex kv("\\\"([^\"]+)\\\"\\s*:\\s*(-?[0-9.]+)");for(std::sregex_iterator i(obj.begin(),obj.end(),kv),e;i!=e;++i)for(size_t j=0;j<m.variables.size();++j)if(m.variables[j].name==(*i)[1])m.objective[j]=parseNumber((*i)[2]);
     std::regex cr("\\{\\s*\\\"name\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"coefficients\\\"\\s*:\\s*\\{([^}]*)\\}.*?\\\"operator\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"rhs\\\"\\s*:\\s*(-?[0-9.]+)",std::regex::icase);for(std::sregex_iterator i(s.begin(),s.end(),cr),e;i!=e;++i){Constraint c;c.originalId=m.constraints.size();c.name=(*i)[1];c.relation=(*i)[3]=="<="?Relation::LessEqual:(*i)[3]==">="?Relation::GreaterEqual:Relation::Equal;c.rhs=parseNumber((*i)[4]);for(std::sregex_iterator j((*i)[2].first,(*i)[2].second,kv),z;j!=z;++j)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*j)[1])c.coefficients[n]=parseNumber((*j)[2]);m.constraints.push_back(c);}std::regex qsec("\\\"quadratic_terms\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch qmatch;if(std::regex_search(s,qmatch,qsec))for(std::sregex_iterator i(qmatch[1].first,qmatch[1].second,kv),e;i!=e;++i)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*i)[1])m.quadratic[n]=parseNumber((*i)[2]);m.rebuildMappings();return m;
 }
-inline Model parseInput(const std::string& path){std::ifstream f(path);if(!f)throw std::runtime_error("cannot open input: "+path);std::string first;std::getline(f,first);if(first.find("NAME")==0||first.find("NAME ")==0)return parseMPS(path);if(first.find('{')!=std::string::npos)return parseJSON(path);return parseText(path);}
+inline Model parseInput(const std::string& path){
+    std::ifstream f(path);if(!f)throw std::runtime_error("cannot open input: "+path);
+    std::string line; bool json=false, mps=false;
+    while(std::getline(f,line)) {
+        const auto first=line.find_first_not_of(" \t\r\n"); if(first==std::string::npos)continue;
+        if(line[first]=='*'||line[first]=='#')continue;
+        if(line[first]=='{')json=true;
+        std::istringstream in(line.substr(first)); std::string token; in>>token;
+        for(char& c:token)c=static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        mps=(token=="NAME"||token=="ROWS"||token=="OBJSENSE");
+        break;
+    }
+    if(mps)return parseMPS(path);if(json)return parseJSON(path);return parseText(path);
+}
 }
 

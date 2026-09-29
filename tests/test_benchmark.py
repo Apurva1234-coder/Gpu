@@ -39,9 +39,12 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual([v.name for v in model.variables[:4]], ["X01", "X02", "X03", "X04"])
 
     def test_netlib_emps_is_rejected_without_unverified_conversion(self):
-        path = ROOT / "benchmarks" / "netlib" / "adlittle.mps.txt"
-        with self.assertRaisesRegex(ValueError, "cannot verify coefficient fidelity"):
-            parse_problem_file(str(path))
+        emps = "NAME ADLITTLE\n1 2 3 4 5 6 7 8\n9 10 11\n12 13 14\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "adlittle.mps.txt"
+            path.write_text(emps, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot verify coefficient fidelity"):
+                parse_problem_file(str(path))
 
     def test_miplib_style_integer_mps_preserves_bounds(self):
         text = """NAME TESTMILP
@@ -137,12 +140,12 @@ ENDATA
             self.assertEqual(list(root.glob("sovereign_benchmark_*")), [])
 
     def test_netlib_emps_cannot_reach_solver_until_fidelity_is_verified(self):
-        source = ROOT / "benchmarks" / "netlib" / "afiro.mps.txt"
         solver = ROOT / "cpp_solver" / "build" / "sovereign_presolve_cli.exe"
         with tempfile.TemporaryDirectory() as tmp:
             inputs = Path(tmp) / "inputs"
             inputs.mkdir()
-            (inputs / source.name).write_bytes(source.read_bytes())
+            (inputs / "afiro.mps.txt").write_text(
+                "NAME AFIRO\n1 2 3 4 5 6 7 8\n9 10 11\n12 13 14\n", encoding="utf-8")
             args = argparse.Namespace(input=str(inputs), solver=str(solver), output_dir=str(Path(tmp) / "out"),
                 dataset="netlib", device=0, tier="quick", limit=1, method="revised-simplex", backend="cpu",
                 no_presolve=False, time_limit=5.0, feasibility_tol=1e-7, objective_tol=1e-6,

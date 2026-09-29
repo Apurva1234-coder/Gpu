@@ -1,0 +1,3 @@
+fastapi>=0.128,<1
+uvicorn>=0.40,<1
+python-multipart>=0.0.22,<1

@@ -1,4 +1,5 @@
 #include "lp/MehrotraIPM.hpp"
+#include "qp/GeneralQP.hpp"
 #include <cassert>
 #include <cmath>
 using namespace sovereign;
@@ -33,4 +34,9 @@ int main() {
     assert(low.solution.primal.size()==2);
     assert(std::abs(low.solution.primal[0]-4)<1e-5);
     assert(std::abs(low.solution.primal[1])<1e-5);
+
+    Model nonconvex; nonconvex.name="nonconvex";
+    nonconvex.variables={{0,0,"x",VariableType::Continuous,0,INF,true}};
+    nonconvex.quadratic[0]=-2;
+    assert(GeneralQPInteriorPoint{}.solve(nonconvex).status==QPStatus::UnsupportedNonconvex);
 }

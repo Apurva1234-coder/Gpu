@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07111e" />
+    <title>Sovereign | Optimization Control Plane</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .explorer-heading{align-items:flex-start}.explorer-heading .eyebrow{margin-bottom:6px}.export-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.export-button{border:1px solid var(--line);border-radius:6px;color:#bcd7e9;text-decoration:none;font:10px var(--mono);padding:8px 10px;transition:.2s}.export-button:hover{border-color:var(--mint);color:var(--mint)}.explorer-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin:17px 0}.explorer-stat{border:1px solid var(--line);border-radius:8px;padding:11px;background:rgba(5,14,24,.25)}.explorer-stat p{margin:0 0 4px;color:var(--muted);font:9px var(--mono);letter-spacing:.07em}.explorer-stat strong{font-size:18px}.key-variables{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:12px 0;margin-bottom:15px}.key-variables p{margin:0 5px 0 0;color:var(--muted);font:9px var(--mono);letter-spacing:.09em}.key-variables span{display:flex;gap:7px;align-items:center;border:1px solid var(--line);border-radius:5px;padding:5px 7px;font:10px var(--mono)}.key-variables b{color:#cfe3ef}.key-variables em{color:var(--mint);font-style:normal}.explorer-controls{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin:14px 0;flex-wrap:wrap}.filter-chips{display:flex;gap:6px;flex-wrap:wrap}.filter-chips button,.variable-pagination button,.inline-explorer-button{background:transparent;border:1px solid var(--line);border-radius:6px;color:var(--muted);cursor:pointer;font:10px var(--mono);padding:8px 10px}.filter-chips button.active{background:rgba(101,216,189,.1);border-color:var(--line-hot);color:var(--mint)}.filter-chips button:hover:not(.active),.variable-pagination button:hover:not(:disabled),.inline-explorer-button:hover{border-color:#668aa4;color:#d8e9f3}.filter-chips button:disabled,.variable-pagination button:disabled{cursor:not-allowed;opacity:.4}.explorer-selects{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}.explorer-selects .select{width:auto;min-width:128px;padding:8px}.explorer-selects .search{min-width:190px;padding:8px}.variable-pagination{display:flex;justify-content:space-between;align-items:center;gap:12px;padding-top:14px;color:var(--muted);font:10px var(--mono)}.variable-pagination div{display:flex;gap:7px}@media(max-width:820px){.explorer-summary{grid-template-columns:repeat(3,1fr)}.explorer-selects{justify-content:flex-start}.explorer-heading{gap:12px}}@media(max-width:480px){.explorer-summary{grid-template-columns:repeat(2,1fr)}.explorer-heading{display:block}.export-actions{justify-content:flex-start;margin-top:12px}.explorer-selects .select,.explorer-selects .search{width:100%;min-width:0}.variable-pagination{align-items:flex-start;flex-direction:column}}
+      .auto-decision{display:grid;gap:9px}.decision-row{display:grid;grid-template-columns:145px 1fr;gap:11px;align-items:center;border:1px solid var(--line);border-radius:7px;padding:10px;font-size:11px}.decision-row span{color:var(--muted);font:9px var(--mono);letter-spacing:.07em}.decision-row b{color:#c8dae7;font-weight:600}.decision-row.done{border-color:rgba(101,216,189,.25)}.decision-row.done b{color:var(--mint)}.decision-row.running{border-color:rgba(248,188,98,.4)}.decision-row.warning b{color:var(--amber)}.selection-why{border-top:1px solid var(--line);padding-top:12px;margin-top:3px}.selection-why summary{cursor:pointer;color:#bcd4e5;font:10px var(--mono)}.selection-why p{font-size:11px;color:var(--muted);line-height:1.6;margin:9px 0 0}.expert-mode{margin-top:18px}.expert-mode summary{cursor:pointer;color:#bdd2e3;font:10px var(--mono);letter-spacing:.07em}.expert-mode .config-list{margin-top:15px}.expert-mode .run-button{background:linear-gradient(100deg,#527da1,#6380a5);color:#eff7ff}@media(max-width:480px){.decision-row{grid-template-columns:1fr}.decision-row b{line-height:1.45}}
+    </style>
+  </head>
+  <body>
+    <div class="aurora aurora-one"></div><div class="aurora aurora-two"></div><div class="grid"></div>
+    <header class="topbar">
+      <a class="brand" href="#dashboard" aria-label="Sovereign dashboard"><span class="brand-mark">S</span><span>SOVEREIGN</span><small>OPTIMIZATION CORE</small></a>
+      <nav><a href="#dashboard" class="active">Dashboard</a><a href="#solve">Solve</a><a href="#benchmarks">Benchmarks</a><a href="#hardware">Hardware</a></nav>
+      <div class="system-pill"><span id="deviceDot" class="dot"></span><span id="deviceStatus">Detecting compute</span></div>
+    </header>
+
+    <main>
+      <section id="dashboard" class="hero section-shell">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="pulse"></span> COMPUTATIONAL OPTIMIZATION PLATFORM</p>
+          <h1>Sovereign<br /><em>Optimization Solver</em></h1>
+          <p class="lede">High-Performance LP, QP &amp; MILP Optimization</p>
+          <p class="supporting">An indigenous C++ optimization engine with sparse numerical methods, presolve, verification, and optional CUDA acceleration.</p>
+          <div class="hero-actions"><a class="button primary" href="#solve">Solve a problem <span>→</span></a><a class="button ghost" href="#benchmarks">View benchmarks</a></div>
+          <div class="trust-line"><span>◈</span> Measured compute times exclude browser rendering and network latency.</div>
+        </div>
+        <div class="hero-visual panel">
+          <div class="panel-topline"><span>LIVE ENGINE TOPOLOGY</span><span class="mono" id="engineState">INITIALIZING</span></div>
+          <div class="topology">
+            <div class="topo-node active"><b>MODEL</b><small>LP / QP / MILP</small></div><i></i>
+            <div class="topo-node"><b>PRESOLVE</b><small>Reduction engine</small></div><i></i>
+            <div class="topo-node"><b>SOLVE</b><small>C++ core</small></div><i></i>
+            <div class="topo-node"><b>VERIFY</b><small>Original model</small></div>
+          </div>
+          <div class="compute-readout"><span class="readout-label">BACKEND</span><strong id="heroBackend">CPU / CUDA</strong><span id="heroDevice" class="muted">Detecting hardware…</span></div>
+          <div class="trace"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+        </div>
+      </section>
+
+      <section class="section-shell capabilities">
+        <article class="cap-card"><span class="cap-icon">∑</span><p>SUPPORTED MODELS</p><strong>LP <i>|</i> QP <i>|</i> MILP</strong></article>
+        <article class="cap-card"><span class="cap-icon">⌁</span><p>COMPUTE</p><strong>CPU <i>|</i> CUDA</strong></article>
+        <article class="cap-card"><span class="cap-icon">✓</span><p>VERIFICATION</p><strong>Original-model verification</strong></article>
+        <article class="cap-card"><span class="cap-icon">◈</span><p>ENGINE</p><strong>C++ Optimization Core</strong></article>
+      </section>
+
+      <section id="solve" class="section-shell solve-section">
+        <div class="section-heading"><div><p class="eyebrow">SOLVE WORKSPACE</p><h2>Bring a model into focus.</h2></div><p>Analyze a supported model, select the real execution path, and inspect independently verified output.</p></div>
+        <div class="example-row"><span>QUICK START</span><button data-example="lp">Try LP example</button><button data-example="qp">Try QP example</button><button data-example="milp">Try MILP example</button><button data-example="netlib-emps">Try Netlib EMPS</button></div>
+        <div id="dropZone" class="upload-zone" tabindex="0"><input id="fileInput" type="file" accept=".mps,.json,.txt" />
+          <div class="upload-glyph">⇪</div><h3>Drop an optimization model here</h3><p>or <button id="browseButton" class="link-button">browse files</button> · MPS, JSON, TXT · up to 12 MB</p><span class="upload-note">Netlib EMPS/FMPS input is expanded locally before the C++ solver runs.</span>
+        </div>
+        <div id="analysisArea" class="hidden"></div>
+      </section>
+
+      <section id="benchmarks" class="section-shell benchmark-section">
+        <div class="section-heading"><div><p class="eyebrow">MEASURED BENCHMARKS</p><h2>Evidence, not claims.</h2></div><p>Local benchmark reports are shown as recorded, including timeouts, unsupported cases, and verification results.</p></div>
+        <div id="benchmarkArea" class="panel loading-panel">Loading local benchmark reports…</div>
+      </section>
+
+      <section id="hardware" class="section-shell hardware-section">
+        <div class="section-heading"><div><p class="eyebrow">SYSTEM &amp; ACCELERATION</p><h2>Transparent compute architecture.</h2></div><p>CUDA acceleration is only used for numerical operations implemented by the solver backend. Presolve and solver control remain CPU based.</p></div>
+        <div id="hardwareArea" class="hardware-grid"><div class="panel loading-panel">Inspecting local hardware…</div></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

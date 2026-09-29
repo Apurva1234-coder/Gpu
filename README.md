@@ -66,6 +66,36 @@ cmake --build cpp_solver/build --config Release
 
 The executable is `cpp_solver/build/sovereign_presolve_cli` (Linux/macOS) or `cpp_solver/build/Release/sovereign_presolve_cli.exe` (Windows multi-configuration generators).
 
+## Run the Sovereign web dashboard
+
+The optional local dashboard is a thin FastAPI adapter around the existing C++ executable. It does not implement optimization in Python or JavaScript. A valid upload starts the automatic pipeline: parse, validate, classify, presolve, deterministic solver/backend selection, solve, postsolve, and original-model verification. The central `webui/solver_policy.py` selects only implemented paths: revised simplex for automatic continuous LP, Newton/Barrier for QP, and branch-and-bound for MILP. Expert Mode exposes the implemented manual controls for technical use.
+
+From the repository root on Windows:
+
+```powershell
+python -m venv .venv-web
+.\.venv-web\Scripts\python.exe -m pip install -r webui\requirements.txt
+.\.venv-web\Scripts\python.exe -m uvicorn webui.app:app --host 127.0.0.1 --port 8000
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Build the C++ targets first. The dashboard supports the repository's `.mps`, `.json`, and `.txt` inputs, including Netlib EMPS/FMPS `.mps.txt` streams. EMPS is expanded in the job directory with the checked-in Netlib reference decoder before the existing parser and C++ solver run. Uploads are limited to 12 MB; expanded MPS output is limited to 96 MB. The adapter uses safe temporary files and subprocess argument arrays and enforces a configurable server-side time limit.
+
+Available API routes:
+
+```text
+GET  /api/health
+GET  /api/device
+GET  /api/capabilities
+POST /api/analyze
+POST /api/examples/{lp|qp|milp}
+POST /api/solve
+GET  /api/solve/{id}
+GET  /api/results/{id}
+GET  /api/benchmarks
+```
+
+`solver_time_ms` is always sourced from the C++ CLI's `Solve time ms` field. `backend_total_time_ms` is separately reported by the adapter and is never shown as solver time.
+
 Run the C++ tests with:
 
 ```bash
@@ -188,7 +218,7 @@ benchmarks/
 results/                             # generated output; keep inputs separate
 ```
 
-Supported model files are this project's JSON/text models and the implemented linear MPS subset (`.mps`). Gzip-compressed linear MPS (`.mps.gz`) is supported, while Netlib EMPS `.mps.txt` is explicitly rejected until its coefficient decoding can be verified. The current QP interface supports diagonal quadratic objectives in project JSON/text models; standard QPLIB and quadratic MPS encodings are not parsed and are recorded as `UNSUPPORTED` with the parser reason. Mittelmann instances are only run when they use a compatible supported input. The workspace currently contains a local standard-MPS AFIRO fixture, compressed Netlib EMPS files, and gzip MIPLIB MPS files; it contains no `.qplib` instances or compatible Mittelmann inputs. No datasets are downloaded automatically. Place locally obtained files under the corresponding family folders; do not put generated results under benchmark input trees.
+Supported model files are this project's JSON/text models and the implemented linear MPS subset (`.mps`). Gzip-compressed linear MPS (`.mps.gz`) is supported by the benchmark parser. The web dashboard also accepts Netlib EMPS/FMPS `.mps.txt` inputs and expands them with the checked-in Netlib reference decoder. The current QP interface supports diagonal quadratic objectives in project JSON/text models; standard QPLIB and quadratic MPS encodings are not parsed and are recorded as `UNSUPPORTED` with the parser reason. Mittelmann instances are only run when they use a compatible supported input. The workspace currently contains a local standard-MPS AFIRO fixture, compressed Netlib EMPS files, and gzip MIPLIB MPS files; it contains no `.qplib` instances or compatible Mittelmann inputs. No datasets are downloaded automatically. Place locally obtained files under the corresponding family folders; do not put generated results under benchmark input trees.
 
 The runner emits class-specific LP/MILP/QP CSV and JSON, an all-instance dataset JSON, `external_solver_comparison.csv/json`, `cpu_gpu_benchmark.csv/json`, `presolve_benchmark.csv/json`, `numerical_robustness.csv/json`, and `benchmark_summary.md`. HiGHS is optional and currently compared on LP/MILP; absent HiGHS is recorded as `NOT_AVAILABLE`. CUDA is optional; unsupported methods are labeled and CPU execution continues. CUDA event timings and memory-per-process are not exposed by the current solver CLI, so those fields remain empty and are not inferred from wall-clock time.
 

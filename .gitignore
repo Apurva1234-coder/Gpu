@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-web/
 venv/
 *.egg-info/
 *.exe
@@ -20,3 +21,5 @@ venv/
 *.obj
 *.exp
 *.lib
+webui-server*.log
+webui-server*.err

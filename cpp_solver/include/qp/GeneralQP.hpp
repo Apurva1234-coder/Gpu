@@ -5,6 +5,8 @@ class GeneralQPInteriorPoint {
  public:
   explicit GeneralQPInteriorPoint(Tolerance t={}):tol_(t){}
   QPResult solve(const Model& m,std::size_t limit=150) const {
+    const auto convexity=checkQPConvexity(m,tol_);
+    if(!convexity.isConvex){QPResult r;r.status=convexity.classification==QPConvexity::Indefinite?QPStatus::UnsupportedNonconvex:QPStatus::NumericalFailure;r.message=convexity.message;return r;}
     for(const auto& v:m.variables) if(!std::isfinite(v.lower)){ QPResult r;r.status=QPStatus::Unsupported;r.message="free variables require split-form QP support";return r; }
     Model t;t.name=m.name+" [standard form]";const std::size_t n=m.variables.size();
     for(std::size_t i=0;i<n;++i){t.variables.push_back({i,i,m.variables[i].name,VariableType::Continuous,0,INF,true});if(m.objective.count(i))t.objective[i]=m.objective.at(i)+(m.quadratic.count(i)?m.quadratic.at(i)*m.variables[i].lower:0);if(m.quadratic.count(i))t.quadratic[i]=m.quadratic.at(i);}
