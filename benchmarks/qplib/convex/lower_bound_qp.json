@@ -1,0 +1,1 @@
+{"name":"Lower Bound QP","objective_sense":"minimize","variables":[{"name":"x","type":"continuous","lower":2}],"objective":{"x":-6},"quadratic_terms":{"x":2},"constraints":[]}

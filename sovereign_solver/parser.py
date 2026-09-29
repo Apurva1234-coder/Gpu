@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict
 from .validation import validate_payload
 from .mps import parse_mps
+from .qplib import parse_qplib
 
 
 def parse_problem_file(path: str):
@@ -27,6 +28,12 @@ def parse_problem_file(path: str):
                 "verify coefficient fidelity. Use a standard MPS copy; no conversion was attempted."
             )
         return parse_mps(text)
+    if Path(path).suffix.lower() == ".qplib" or first.startswith("QPLIB") or "QPLIB" in first:
+        try:
+            payload = parse_qplib(text)
+            return validate_payload(payload)
+        except Exception:
+            pass
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
