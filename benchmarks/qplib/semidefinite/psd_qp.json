@@ -1,0 +1,1 @@
+{"name":"PSD QP","objective_sense":"minimize","variables":[{"name":"x","type":"continuous"},{"name":"y","type":"continuous"}],"objective":{"x":1},"quadratic_terms":{"x":2},"constraints":[]}
