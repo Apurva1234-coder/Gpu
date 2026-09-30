@@ -1,4 +1,4 @@
-const state = { jobId: null, analysis: null, device: null, capabilities: null, benchmarkData: [], result: null };
+const state = { jobId: null, analysis: null, device: null, capabilities: null, benchmarkData: [], result: null, runningTimer: null, runningStarted: null, runningConfiguration: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const nf = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -6,8 +6,10 @@ const nf = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 function escapeHtml(value = "") { return String(value).replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[c])); }
 function number(value, digits = 2) { return value === null || value === undefined || Number.isNaN(Number(value)) ? "—" : new Intl.NumberFormat("en-US", {maximumFractionDigits: digits}).format(Number(value)); }
 function milliseconds(value) { return value === null || value === undefined ? "—" : `${number(value, 2)} ms`; }
+function seconds(value) { return value === null || value === undefined ? "N/A" : `${number(value, 2)} s`; }
+function timeLimitLabel(value) { const limit=Number(value); return Number.isFinite(limit) && limit > 0 ? `${number(limit,0)} seconds` : "No time limit"; }
 function fileSize(bytes) { return bytes < 1024 * 1024 ? `${number(bytes / 1024, 1)} KB` : `${number(bytes / 1024 / 1024, 2)} MB`; }
-function statusClass(status) { const text = (status || "").toUpperCase(); return text.includes("OPTIMAL") || text === "FEASIBLE" ? "pass" : text.includes("TIME") || text.includes("ITERATION") || text.includes("UNSUPPORTED") ? "warning" : "bad"; }
+function statusClass(status) { const text = (status || "").toUpperCase(); return text.includes("OPTIMAL") || text === "FEASIBLE" ? "pass" : text.includes("TIME") || text.includes("ITERATION") || text.includes("NODE_LIMIT") || text.includes("MEMORY_LIMIT") || text.includes("UNSUPPORTED") ? "warning" : "bad"; }
 function toast(message) { const element = $("#toast"); element.textContent = message; element.classList.remove("hidden"); setTimeout(() => element.classList.add("hidden"), 4200); }
 async function api(path, options = {}) { const response = await fetch(path, options); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`); return data; }
 
@@ -23,9 +25,9 @@ function renderDevice() {
   const device = state.device;
   if (!device) return;
   $("#deviceDot").classList.add("online");
-  $("#deviceStatus").textContent = device.cuda_available ? "CUDA acceleration active" : "CPU fallback active";
-  $("#heroBackend").textContent = device.cuda_available ? "CPU + CUDA" : "CPU";
-  $("#heroDevice").textContent = device.cuda_available ? (device.gpu_name || `${device.gpu_count} CUDA device${device.gpu_count === 1 ? "" : "s"}`) : "CUDA unavailable · CPU fallback active";
+  $("#deviceStatus").textContent = device.cuda_available ? "CUDA available" : "CPU fallback active";
+  $("#heroBackend").textContent = device.cuda_available ? "CPU + CUDA kernels" : "CPU";
+  $("#heroDevice").textContent = device.cuda_available ? (device.gpu_name || `${device.gpu_count} CUDA device${device.gpu_count === 1 ? "" : "s"}`) : device.cuda_reason;
   $("#engineState").textContent = "READY";
 }
 
@@ -34,8 +36,8 @@ function renderHardware() {
   const cuda = device.cuda_available;
   $("#hardwareArea").innerHTML = `
     <article class="panel hardware-card"><p>CPU</p><strong>${escapeHtml(device.cpu)}</strong><small>${number(device.threads, 0)} logical threads detected</small></article>
-    <article class="panel hardware-card"><p>CUDA ACCELERATION</p><strong class="${cuda ? "pass" : "warning"}">${cuda ? "AVAILABLE" : "UNAVAILABLE"}</strong><small>${cuda ? escapeHtml(device.gpu_name || `${device.gpu_count} CUDA device(s)`) : "CPU fallback active"}</small></article>
-    <article class="panel hardware-card"><p>SOLVER BACKENDS</p><strong>CPU <span class="pass">AVAILABLE</span></strong><small>CUDA ${cuda ? "available for supported numerical operations" : "unavailable on this system"}</small></article>
+    <article class="panel hardware-card"><p>CUDA ACCELERATION</p><strong class="${cuda ? "pass" : "warning"}">${cuda ? "AVAILABLE" : "CPU FALLBACK ACTIVE"}</strong><small>${escapeHtml(cuda ? (device.gpu_name || `${device.gpu_count} CUDA device(s)`) : device.cuda_reason)}</small></article>
+    <article class="panel hardware-card"><p>SOLVER BACKENDS</p><strong>CPU <span class="pass">AVAILABLE</span></strong><small>${escapeHtml(device.cuda_reason)}</small></article>
     <article class="panel architecture-note">CUDA acceleration is used only for solver operations supported by the GPU backend. Presolve, simplex where applicable, branch-and-bound control, parsing, and verification remain CPU-managed unless the solver explicitly reports otherwise.</article>`;
 }
 
@@ -50,20 +52,21 @@ function bindUpload() {
 }
 
 async function loadExample(name) {
-  try { const response = await api(`/api/examples/${name}`, { method: "POST" }); applyAnalysis(response); $("#analysisArea").scrollIntoView({behavior:"smooth", block:"start"}); } catch (error) { toast(error.message); }
+  try { const response = await api(`/api/examples/${name}`, { method: "POST" }); await applyAnalysis(response); $("#analysisArea").scrollIntoView({behavior:"smooth", block:"start"}); } catch (error) { toast(error.message); }
 }
 
 async function analyzeFile(file) {
-  if (!/\.(mps|json|txt)$/i.test(file.name)) return toast("Use a supported MPS, JSON, or TXT model.");
+  if (!/\.(mps|json|txt|qplib)$/i.test(file.name)) return toast("Use a supported MPS, JSON, TXT, or QPLIB model.");
   const form = new FormData(); form.append("file", file);
   $("#dropZone").classList.add("dragging");
-  try { const response = await api("/api/analyze", { method: "POST", body: form }); applyAnalysis(response); } catch (error) { toast(error.message); } finally { $("#dropZone").classList.remove("dragging"); }
+  try { const response = await api("/api/analyze", { method: "POST", body: form }); await applyAnalysis(response); } catch (error) { toast(error.message); } finally { $("#dropZone").classList.remove("dragging"); }
 }
 
-function applyAnalysis(response) {
+async function applyAnalysis(response) {
   state.jobId = response.job_id;
   state.analysis = response.analysis;
   state.result = null;
+  state.policy = (await api(`/api/policy/${encodeURIComponent(state.jobId)}`)).selection;
   const area = $("#analysisArea");
   area.classList.remove("hidden");
   renderAnalysis();
@@ -78,50 +81,86 @@ function modelMethods(type) {
 
 function renderAnalysis() {
   const a = state.analysis; if (!a) return;
+  const policy = state.policy || {};
   const methods = modelMethods(a.problem_type).map(method => `<option value="${method.v}">${method.t}</option>`).join("");
   $("#analysisArea").innerHTML = `
     <div class="analysis-layout">
       <article class="panel analysis-card"><div class="analysis-title"><div><p class="eyebrow">MODEL ANALYSIS</p><h3>${escapeHtml(a.name)}</h3><p class="file-meta">${escapeHtml(a.file_name)} · ${a.format} · ${fileSize(a.file_size)}</p>${a.conversion ? `<p class="file-meta pass">${escapeHtml(a.conversion)}</p>` : ""}</div><span class="type-badge">${a.problem_type}</span></div>
         <div class="stat-grid">
-          ${stat("VARIABLES", number(a.variables,0))}${stat("CONSTRAINTS",number(a.constraints,0))}${stat("NON-ZEROS",number(a.nonzeros,0))}${stat("SPARSITY",`${number(a.sparsity,2)}%`)}
+          ${stat("VARIABLES", number(a.variables,0))}${stat("CONSTRAINTS",number(a.constraints,0))}${stat("NON-ZEROS",number(a.nonzeros,0))}${a.problem_type === "QP" ? stat("HESSIAN NON-ZEROS",number(a.quadratic_nonzeros,0)) : ""}${stat("SPARSITY",`${number(a.sparsity,2)}%`)}
           ${stat("CONTINUOUS",number(a.types.continuous,0))}${stat("DISCRETE",number(a.types.integer+a.types.binary,0))}${stat("BOUNDS",number(a.bounded_variables,0))}${stat("OBJECTIVE",escapeHtml(a.objective_sense.toUpperCase()))}
         </div>
       </article>
-      <article class="panel analysis-card"><div class="analysis-title"><div><p class="eyebrow">AUTOMATIC OPTIMIZATION</p><h3 id="autoStatus">Preparing automatic pipeline</h3></div><span class="type-badge">AUTO</span></div>
-        <div id="autoDecision" class="auto-decision"><div class="decision-row done"><span>MODEL DETECTED</span><b>${escapeHtml(a.problem_type)}</b></div><div class="decision-row done"><span>PROBLEM CLASSIFIED</span><b>${escapeHtml(a.classification_reason)}</b></div><div class="decision-row running"><span>PRESOLVE · SOLVER · COMPUTE</span><b>Automatic selection in progress</b></div></div>
-        <details class="advanced expert-mode"><summary>ADVANCED / EXPERT MODE</summary><div class="config-list"><div class="config-item"><label>SOLVER METHOD</label><select id="methodSelect" class="select">${methods}</select></div><div class="config-item"><label>COMPUTE BACKEND</label><select id="backendSelect" class="select"><option value="auto">AUTO</option><option value="cpu">CPU</option><option value="cuda" ${state.device?.cuda_available ? "" : "disabled"}>CUDA${state.device?.cuda_available ? "" : " · unavailable"}</option></select></div><div class="toggle-row"><span>PRESOLVE</span><label class="switch"><input id="presolveToggle" type="checkbox" checked><i class="slider"></i></label></div><div class="config-item"><label>MAX ITERATIONS <span class="muted">(0 = unlimited)</span></label><input id="iterationInput" class="control" type="number" min="0" max="10000000" value="10000"></div><div class="config-item"><label>TIME LIMIT (SECONDS)</label><input id="timeInput" class="control" type="number" min="1" max="3600" value="60"></div><button id="expertRunButton" class="run-button">RUN WITH EXPERT SETTINGS <span>→</span></button></div></details>
+      <article class="panel analysis-card"><div class="analysis-title"><div><p class="eyebrow">AUTOMATIC EXECUTION POLICY</p><h3 id="autoStatus">Policy selected · optimization starting</h3></div><span class="type-badge">${escapeHtml(policy.model_size || "AUTO")}</span></div>
+        <div id="autoDecision" class="auto-decision"><div class="decision-row done"><span>MODEL SIZE</span><b>${escapeHtml(policy.model_size || "—")} · score ${number(policy.complexity_score, 0)}</b></div><div class="decision-row done"><span>TIME LIMIT</span><b>${timeLimitLabel(policy.time_limit_seconds)}</b></div>${a.problem_type === "MILP" ? `<div class="decision-row done"><span>MAX B&B NODES</span><b>${number(policy.max_nodes, 0)}</b></div><div class="decision-row done"><span>MAX LP ITERATIONS</span><b>${number(policy.max_iterations, 0)}</b></div>` : `<div class="decision-row done"><span>MAXIMUM ITERATIONS</span><b>${number(policy.max_iterations, 0)}</b></div>`}<div class="decision-row done"><span>SOLVER · BACKEND</span><b>${escapeHtml(policy.method || "—")} · ${escapeHtml(policy.backend || "—")}</b></div><details class="selection-why"><summary>WHY?</summary><p>${escapeHtml(policy.reason || "Automatic policy is being prepared.")}</p><p>${escapeHtml(policy.backend_reason || "")}</p></details></div>
+        <details class="advanced expert-mode"><summary>ADVANCED / EXPERT MODE</summary><div class="config-list"><div class="config-item"><label>SOLVER METHOD</label><select id="methodSelect" class="select">${methods}</select></div><div class="config-item"><label>COMPUTE BACKEND</label><select id="backendSelect" class="select"><option value="auto">AUTO</option><option value="cpu">CPU</option><option value="cuda" ${state.device?.cuda_available ? "" : "disabled"}>CUDA${state.device?.cuda_available ? "" : " · unavailable"}</option></select></div><div class="toggle-row"><span>PRESOLVE</span><label class="switch"><input id="presolveToggle" type="checkbox" checked><i class="slider"></i></label></div>${a.problem_type === "MILP" ? `<div class="config-item"><label>MAX B&B NODES <span class="muted">(0 = unlimited)</span></label><input id="nodeInput" class="control" type="number" min="0" max="10000000" value="${policy.max_nodes || 10000}"></div><div class="config-item"><label>MAX LP ITERATIONS <span class="muted">(0 = unlimited)</span></label><input id="iterationInput" class="control" type="number" min="0" max="10000000" value="${policy.max_iterations || 10000}"></div><p class="file-meta">The node limit controls search breadth. The LP iteration limit applies separately to each node relaxation.</p>` : `<div class="config-item"><label>MAX ITERATIONS <span class="muted">(0 = unlimited)</span></label><input id="iterationInput" class="control" type="number" min="0" max="10000000" value="${policy.max_iterations || 10000}"></div><p class="file-meta">Unlimited iterations may result in very long execution times.</p>`}<div class="config-item"><label>TIME LIMIT (SECONDS) <span class="muted">(0 = no limit)</span></label><input id="timeInput" class="control" type="number" min="0" max="3600" value="${policy.time_limit_seconds ?? 0}"></div><button id="expertRunButton" class="run-button">RUN WITH EXPERT SETTINGS <span>→</span></button></div></details>
       </article>
     </div>
-    <article class="panel matrix-card"><div class="matrix-head"><h3>CONSTRAINT MATRIX SPARSITY</h3><span>${a.matrix.aggregated ? "Visualization aggregated for display" : "Exact display sampling"}</span></div><div class="matrix-viewport"><canvas id="matrixCanvas" aria-label="Constraint matrix sparsity plot"></canvas></div></article>
+    <article class="panel matrix-card"><div class="matrix-head"><div><h3>CONSTRAINT MATRIX OVERVIEW</h3><p>Shows where variables and constraints interact.</p></div><span>${a.matrix.aggregated ? "Aggregated view for display" : "Exact matrix view"}</span></div><div class="matrix-summary">${stat("VARIABLES",number(a.variables,0))}${stat("CONSTRAINTS",number(a.constraints,0))}${stat("NON-ZERO COEFFICIENTS",number(a.nonzeros,0))}${stat("SPARSITY",`${number(a.sparsity,2)}%`)}</div><div class="matrix-viewport"><canvas id="matrixCanvas" aria-label="Constraint matrix interaction heatmap"></canvas><div id="matrixUnavailable" class="matrix-unavailable hidden">Matrix visualization unavailable.</div><div id="matrixTooltip" class="matrix-tooltip hidden"></div></div><div class="matrix-legend"><span><i class="heat-key high"></i>More interactions</span><span><i class="heat-key low"></i>Fewer interactions</span><p>Fewer highlighted areas generally mean a sparser optimization problem.</p></div></article>
     <div id="resultArea"></div>`;
   $("#expertRunButton").addEventListener("click", runExpertSolve); renderMatrix();
 }
 function stat(label,value){return `<div class="stat"><p>${label}</p><strong>${value}</strong></div>`}
 
 function renderMatrix() {
-  const canvas = $("#matrixCanvas"), box = canvas.getBoundingClientRect(), a = state.analysis;
-  canvas.width = Math.max(1, Math.floor(box.width * devicePixelRatio)); canvas.height = Math.max(1, Math.floor(box.height * devicePixelRatio));
-  const ctx = canvas.getContext("2d"); ctx.scale(devicePixelRatio, devicePixelRatio); const width = box.width, height = box.height;
-  ctx.fillStyle="#06111d"; ctx.fillRect(0,0,width,height); ctx.fillStyle="rgba(127,174,204,.08)"; for(let x=0;x<width;x+=30)ctx.fillRect(x,0,1,height); for(let y=0;y<height;y+=30)ctx.fillRect(0,y,width,1);
-  ctx.fillStyle="#65d8bd"; const radius = a.nonzeros > 800 ? 1 : 1.45; a.matrix.points.forEach(([row,col]) => { const x=(col+.5)/Math.max(1,a.matrix.columns)*width; const y=(row+.5)/Math.max(1,a.matrix.rows)*height; ctx.fillRect(x-radius,y-radius,radius*2,radius*2); });
+  const canvas = $("#matrixCanvas"), unavailable = $("#matrixUnavailable"), tooltip = $("#matrixTooltip"), a = state.analysis, matrix = a.matrix || {};
+  const rows = Number(matrix.rows || 0), columns = Number(matrix.columns || 0), nonzeros = Number(a.linear_nonzeros ?? a.nonzeros ?? 0);
+  const displayRows = Number(matrix.display_rows || 0), displayColumns = Number(matrix.display_columns || 0), buckets = Array.isArray(matrix.buckets) ? matrix.buckets : [];
+  if (!rows || !columns || !nonzeros || !displayRows || !displayColumns || !buckets.length) { canvas.classList.add("hidden"); unavailable.classList.remove("hidden"); tooltip.classList.add("hidden"); return; }
+  canvas.classList.remove("hidden"); unavailable.classList.add("hidden");
+  const box = canvas.getBoundingClientRect(), ratio = window.devicePixelRatio || 1, width = box.width, height = box.height;
+  canvas.width = Math.max(1, Math.floor(width * ratio)); canvas.height = Math.max(1, Math.floor(height * ratio));
+  const ctx = canvas.getContext("2d"); ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, width, height);
+  const gap = displayRows > 35 || displayColumns > 35 ? 1 : 2, cellWidth = width / displayColumns, cellHeight = height / displayRows, counts = new Map();
+  buckets.forEach(([row, column, count]) => counts.set(`${row}:${column}`, Number(count)));
+  const maxCount = Math.max(1, ...counts.values());
+  for (let row = 0; row < displayRows; row += 1) for (let column = 0; column < displayColumns; column += 1) {
+    const count = counts.get(`${row}:${column}`) || 0, intensity = count ? 0.2 + 0.8 * Math.log1p(count) / Math.log1p(maxCount) : 0;
+    ctx.fillStyle = count ? `rgba(101,216,189,${intensity})` : "rgba(123,154,181,.10)";
+    ctx.fillRect(column * cellWidth + gap / 2, row * cellHeight + gap / 2, Math.max(0, cellWidth - gap), Math.max(0, cellHeight - gap));
+  }
+  const hideTooltip = () => tooltip.classList.add("hidden");
+  canvas.onmouseleave = hideTooltip;
+  canvas.onmousemove = event => {
+    const rect = canvas.getBoundingClientRect(), column = Math.min(displayColumns - 1, Math.max(0, Math.floor((event.clientX - rect.left) / cellWidth))), row = Math.min(displayRows - 1, Math.max(0, Math.floor((event.clientY - rect.top) / cellHeight)));
+    const count = counts.get(`${row}:${column}`) || 0, rowStart = Math.floor(row * rows / displayRows) + 1, rowEnd = Math.floor((row + 1) * rows / displayRows), columnStart = Math.floor(column * columns / displayColumns) + 1, columnEnd = Math.floor((column + 1) * columns / displayColumns), area = Math.max(1, (rowEnd - rowStart + 1) * (columnEnd - columnStart + 1)), density = count / area * 100;
+    tooltip.innerHTML = `Constraint range: ${rowStart}–${rowEnd}<br>Variable range: ${columnStart}–${columnEnd}<br>Non-zero coefficients: ${number(count,0)}<br>Density: ${number(density,2)}%`;
+    tooltip.style.left = `${Math.min(width - 190, Math.max(8, event.clientX - rect.left + 12))}px`; tooltip.style.top = `${Math.min(height - 92, Math.max(8, event.clientY - rect.top + 12))}px`; tooltip.classList.remove("hidden");
+  };
 }
 
 async function startAutomaticSolve() {
-  renderRunning();
+  renderRunning(state.policy || {});
   try { const result = await api("/api/solve/auto", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_id:state.jobId})}); state.result=result; renderAutomaticDecision(result); renderResult(result); }
   catch(error) { renderFailure(error.message); toast(error.message); const status=$("#autoStatus"); if(status) status.textContent="Automatic pipeline failed"; }
 }
 
 async function runExpertSolve() {
-  const button = $("#expertRunButton"); button.disabled = true; button.textContent = "EXPERT SOLVER RUNNING…"; renderRunning();
-  const request = {job_id:state.jobId, method:$("#methodSelect").value, backend:$("#backendSelect").value, presolve:$("#presolveToggle").checked, max_iterations:Number($("#iterationInput").value), time_limit_seconds:Number($("#timeInput").value)};
+  const button = $("#expertRunButton");
+  const request = {job_id:state.jobId, method:$("#methodSelect").value, backend:$("#backendSelect").value, presolve:$("#presolveToggle").checked, max_iterations:Number($("#iterationInput")?.value ?? 10000), max_nodes:Number($("#nodeInput")?.value ?? 10000), time_limit_seconds:Number($("#timeInput").value)};
+  button.disabled = true; button.textContent = "EXPERT SOLVER RUNNING…";
+  renderRunning(request);
   try { const result = await api("/api/solve", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(request)}); state.result=result; renderResult(result); }
   catch(error) { renderFailure(error.message); toast(error.message); }
   finally { button.disabled=false; button.innerHTML="RUN WITH EXPERT SETTINGS <span>→</span>"; }
 }
 
-function renderRunning() {
-  $("#resultArea").innerHTML = `<div class="result-area"><article class="panel pipeline">${["UPLOADED","PARSING","VALIDATING","CLASSIFYING","PRESOLVING","SELECTING","SOLVING","POSTSOLVING","VERIFYING","COMPLETE"].map((stage,index)=>`<span class="stage ${index===4?"running":index<4?"done":""}">${stage}</span>`).join("")}</article><article class="panel loading-panel">Automatic pipeline is running. The solver does not expose internal progress events, so this view remains indeterminate until it returns a real result.</article></div>`;
+function clearRunningTimer() { if (state.runningTimer) clearInterval(state.runningTimer); state.runningTimer = null; }
+function renderRunning(configuration = {}) {
+  clearRunningTimer(); state.runningConfiguration = configuration; state.runningStarted = Date.now();
+  const limit = Number(configuration.execution_time_limit_seconds ?? configuration.time_limit_seconds ?? 0);
+  const hasTimeLimit = Number.isFinite(limit) && limit > 0;
+  const limitText = hasTimeLimit ? ` / ${String(Math.floor(limit/60)).padStart(2,"0")}:${String(Math.floor(limit%60)).padStart(2,"0")}` : " · NO LIMIT";
+  $("#resultArea").innerHTML = `<div class="result-area"><article class="panel pipeline">${["UPLOADED","PARSING","VALIDATING","CLASSIFYING","PRESOLVING","SELECTING","SOLVING","POSTSOLVING","VERIFYING","COMPLETE"].map((stage,index)=>`<span class="stage ${index===6?"running":index<6?"done":""}">${stage}</span>`).join("")}</article><article class="panel loading-panel solve-loading"><div class="solve-loading-head"><div><p class="eyebrow">ACTIVE EXECUTION</p><h3>OPTIMIZATION IN PROGRESS</h3></div><span class="solve-live-dot">LIVE</span></div><div class="solve-progress" role="progressbar" aria-label="Optimization is running"><i id="solveProgressFill"></i></div><div class="solve-progress-meta"><span>Preparation complete</span><b id="solveState">Solving on ${escapeHtml(configuration.backend || "cpu").toUpperCase()}</b></div><p>Elapsed: <b id="liveElapsed">00:00${limitText}</b></p><p>Method: <b>${escapeHtml(configuration.method || "automatic")}</b> · Backend: <b>${escapeHtml(configuration.backend || "cpu")}</b></p><p class="file-meta">The bar shows completed preparation and active solver work. Iteration events are not streamed by the C++ solver, so it remains animated until a verified result is returned.</p><button id="cancelSolveButton" class="export-button">CANCEL OPTIMIZATION</button></article></div>`;
+  const updateElapsed = () => { const element=$("#liveElapsed"); if (!element) return; const elapsed=(Date.now()-state.runningStarted)/1000; const pad=v=>String(Math.floor(v)).padStart(2,"0"); element.textContent=`${pad(elapsed/60)}:${pad(elapsed%60)}${limitText}`; };
+  updateElapsed(); state.runningTimer=setInterval(updateElapsed, 250);
+  $("#cancelSolveButton").addEventListener("click", cancelOptimization);
+}
+
+async function cancelOptimization() {
+  const button=$("#cancelSolveButton"); if (button) { button.disabled=true; button.textContent="CANCELLING…"; }
+  try { await api(`/api/solve/${encodeURIComponent(state.jobId)}/cancel`, {method:"POST"}); toast("Cancellation requested."); }
+  catch(error) { if (button) { button.disabled=false; button.textContent="CANCEL OPTIMIZATION"; } toast(error.message); }
 }
 
 function renderAutomaticDecision(result) {
@@ -130,37 +169,81 @@ function renderAutomaticDecision(result) {
   if (status) status.textContent = result.verification === "PASS" ? "Automatic pipeline completed" : "Automatic pipeline completed with a warning";
   if (!host) return;
   const pre = result.presolve || {}, attempts = automation.attempts || [];
-  host.innerHTML = `<div class="decision-row done"><span>MODEL DETECTED</span><b>${escapeHtml(result.analysis.problem_type)}</b></div><div class="decision-row done"><span>PRESOLVE</span><b>${pre.before_variables ?? "—"} vars / ${pre.before_constraints ?? "—"} rows → ${pre.after_variables ?? "—"} vars / ${pre.after_constraints ?? "—"} rows</b></div><div class="decision-row done"><span>SOLVER SELECTED</span><b>${escapeHtml(automation.final_method || selection.method || "—")}</b></div><div class="decision-row done"><span>COMPUTE BACKEND</span><b>${escapeHtml(automation.final_backend || selection.backend || "—")}</b></div><div class="decision-row ${result.verification === "PASS" ? "done" : "warning"}"><span>ORIGINAL-MODEL VERIFICATION</span><b>${escapeHtml(result.verification)}</b></div><details class="selection-why"><summary>WHY WAS THIS METHOD SELECTED?</summary><p>${escapeHtml(selection.reason || "Expert settings were supplied.")}</p>${attempts.length > 1 ? `<p>Attempts: ${attempts.map(attempt => `${escapeHtml(attempt.method)} (${escapeHtml(attempt.status)})`).join(" → ")}</p>` : ""}</details>`;
+  host.innerHTML = `<div class="decision-row done"><span>MODEL DETECTED</span><b>${escapeHtml(result.analysis.problem_type)} · ${escapeHtml(selection.model_size || "—")}</b></div><div class="decision-row done"><span>PRESOLVE</span><b>${pre.before_variables ?? "—"} vars / ${pre.before_constraints ?? "—"} rows → ${pre.after_variables ?? "—"} vars / ${pre.after_constraints ?? "—"} rows</b></div><div class="decision-row done"><span>EXECUTION LIMITS</span><b>${timeLimitLabel(result.configuration.time_limit_seconds)} · ${result.analysis.problem_type === "MILP" ? `${number(result.configuration.max_nodes,0)} B&B nodes · ${number(result.configuration.max_iterations,0)} LP iterations/node` : `${number(result.configuration.max_iterations,0)} iterations`}</b></div><div class="decision-row done"><span>SOLVER SELECTED</span><b>${escapeHtml(automation.final_method || selection.method || "—")}</b></div><div class="decision-row done"><span>COMPUTE BACKEND</span><b>${escapeHtml(automation.final_backend || selection.backend || "—")}</b></div><div class="decision-row ${result.verification === "PASS" ? "done" : "warning"}"><span>ORIGINAL-MODEL VERIFICATION</span><b>${escapeHtml(result.verification)}</b></div><details class="selection-why"><summary>WHY WAS THIS METHOD SELECTED?</summary><p>${escapeHtml(selection.reason || "Expert settings were supplied.")}</p><p>${escapeHtml(selection.backend_reason || "")}</p>${attempts.length > 1 ? `<p>Attempts: ${attempts.map(attempt => `${escapeHtml(attempt.method)} (${escapeHtml(attempt.status)})`).join(" → ")}</p>` : ""}</details>`;
 }
 
-function renderFailure(message) { $("#resultArea").innerHTML=`<div class="result-area"><article class="panel result-top"><div class="result-status"><span class="status-orb fail">!</span><div><h2>REQUEST FAILED</h2><p>${escapeHtml(message)}</p></div></div></article></div>`; }
+function renderFailure(message) {
+  clearRunningTimer();
+  const activeJob = String(message).match(/Optimization is already running for ([A-Za-z0-9_-]+)\./)?.[1];
+  if (activeJob) {
+    $("#resultArea").innerHTML = `<div class="result-area"><article class="panel result-top"><div class="result-status"><span class="status-orb warning">!</span><div><h2>SOLVER BUSY</h2><p>An earlier optimization is still using the solver. Cancel that run to free the solver, then upload or select your model and start again.</p><p class="file-meta">Active job: ${escapeHtml(activeJob)}</p><div class="export-actions"><a class="export-button" href="/api/solve/${encodeURIComponent(activeJob)}" target="_blank" rel="noopener">VIEW ACTIVE RUN</a><button id="cancelActiveSolveButton" class="export-button">CANCEL ACTIVE RUN</button></div><p id="activeSolveRecovery" class="file-meta" aria-live="polite"></p></div></div></article></div>`;
+    $("#cancelActiveSolveButton").addEventListener("click", event => cancelActiveSolve(activeJob, event.currentTarget));
+    return;
+  }
+  $("#resultArea").innerHTML=`<div class="result-area"><article class="panel result-top"><div class="result-status"><span class="status-orb fail">!</span><div><h2>REQUEST FAILED</h2><p>${escapeHtml(message)}</p></div></div></article></div>`;
+}
 
-function humanStatus(status) { return (status || "FAILED").replaceAll("_", " "); }
+async function cancelActiveSolve(jobId, button) {
+  const recovery = $("#activeSolveRecovery");
+  button.disabled = true; button.textContent = "CANCELLING…";
+  try {
+    await api(`/api/solve/${encodeURIComponent(jobId)}/cancel`, {method:"POST"});
+    if (recovery) recovery.textContent = "Cancellation requested. Waiting for the solver to stop…";
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const status = await api(`/api/solve/${encodeURIComponent(jobId)}`);
+      if (status.state !== "solving") {
+        button.textContent = "ACTIVE RUN STOPPED";
+        if (recovery) recovery.textContent = jobId === state.jobId
+          ? "The active run stopped. Upload/select the model again, then start a fresh solve."
+          : "The active run stopped. You can now start your solve again.";
+        toast("The active solver run stopped.");
+        return;
+      }
+    }
+    button.disabled = false; button.textContent = "WAITING FOR SOLVER";
+    if (recovery) recovery.textContent = "The solver has not confirmed cancellation yet. Check the active run status before starting another solve.";
+  } catch (error) {
+    button.disabled = false; button.textContent = "CANCEL ACTIVE RUN";
+    if (recovery) recovery.textContent = error.message;
+    toast(error.message);
+  }
+}
+
+function humanStatus(status) { const value=(status || "FAILED").toUpperCase(); if(value==="TIME_LIMIT" || value==="TIME LIMIT") return "TIME LIMIT REACHED"; if(value==="ITERATION_LIMIT" || value==="ITERATION LIMIT") return "LP ITERATION LIMIT REACHED"; if(value==="NODE_LIMIT") return "NODE LIMIT REACHED"; if(value==="MEMORY_LIMIT") return "MEMORY LIMIT REACHED"; if(value==="SOLVER_ERROR") return "SOLVER ERROR"; if(value==="CANCELLED") return "CANCELLED BY USER"; return value.replaceAll("_", " "); }
 function statusExplanation(result) {
   const status=(result.status||"").toUpperCase(); if(status==="OPTIMAL") return "An optimal solution was found and independently verified against the original model.";
   if(status==="FEASIBLE") return "A feasible solution was returned. Review the reported bounds and verification details below.";
   if(status.includes("TIME")) return "The solver reached the configured time limit before proving optimality.";
-  if(status.includes("ITERATION")) return `The solver completed ${number(result.metrics.iterations,0)} iterations without establishing an optimal solution.`;
+  if(status.includes("ITERATION")) return result.metrics.message || "The configured LP iteration limit was reached before optimality was established.";
+  if(status.includes("NODE_LIMIT")) return "The configured branch-and-bound node limit was reached. Any returned incumbent and gap are reported below.";
+  if(status==="CANCELLED") return "The active solver subprocess was terminated at the user's request.";
+  if(status.includes("MEMORY_LIMIT") || status.includes("SOLVER_ERROR")) return result.metrics.message || "The solver process did not complete successfully.";
   if(status.includes("UNSUPPORTED")) return "The solver rejected this model or method because the requested path is not implemented.";
   return result.metrics.message || "The solver did not return a verified optimal solution.";
 }
 
 function renderResult(result) {
+  clearRunningTimer();
   const good = ["OPTIMAL","FEASIBLE"].includes((result.status||"").toUpperCase()) && result.verification === "PASS";
-  const warning = !good && /TIME|ITERATION|UNSUPPORTED/.test(result.status || "");
+  const warning = !good && /TIME|ITERATION|NODE_LIMIT|MEMORY_LIMIT|UNSUPPORTED/.test(result.status || "");
   const cls=good?"":warning?"warn":"fail", symbol=good?"✓":warning?"!":"×";
   const verificationFailed = ["OPTIMAL", "FEASIBLE"].includes((result.status || "").toUpperCase()) && result.verification !== "PASS";
   const headline = verificationFailed ? "VERIFICATION FAILED" : humanStatus(result.status);
   const headlineClass = verificationFailed ? "bad" : statusClass(result.status);
-  const timings = result.timings, metrics = result.metrics, pre=result.presolve;
+  const timings = result.timings, metrics = result.metrics, pre=result.presolve, configuration=result.configuration || {};
   const timingRows = [["Parsing",timings.parse_time_ms],["Presolve",timings.presolve_time_ms],["Solving",timings.solver_time_ms],["Postsolve",timings.postsolve_time_ms],["Verification",timings.verification_time_ms]].filter(row=>row[1]!==null && row[1]!==undefined);
   const largest=Math.max(...timingRows.map(row=>row[1]),1);
   const reduction = pre.before_constraints && pre.after_constraints !== null ? Math.max(0,(1-pre.after_constraints/pre.before_constraints)*100) : null;
+  const limited = String(result.status).toUpperCase().includes("TIME") || String(result.status).toUpperCase().includes("ITERATION") || String(result.status).toUpperCase().includes("NODE_LIMIT") || String(result.status).toUpperCase().includes("MEMORY_LIMIT");
+  const processedModel = limited ? `<article class="panel presolve-card"><p class="eyebrow">MODEL DATA COMPLETED BEFORE SOLVER STOPPED</p><h3>PARSED AND PRESOLVED MODEL</h3><p class="file-meta">No candidate solution was returned before the solver stopped. These are real model and presolve values recorded before solving.</p><div class="stat-grid">${stat("ORIGINAL VARIABLES",number(result.analysis.variables,0))}${stat("ORIGINAL CONSTRAINTS",number(result.analysis.constraints,0))}${stat("MATRIX NON-ZEROS",number(result.analysis.nonzeros,0))}${stat("MATRIX SPARSITY",`${number(result.analysis.sparsity,2)}%`)}${stat("POST-PRESOLVE VARIABLES",pre.after_variables === null || pre.after_variables === undefined ? "N/A" : number(pre.after_variables,0))}${stat("POST-PRESOLVE CONSTRAINTS",pre.after_constraints === null || pre.after_constraints === undefined ? "N/A" : number(pre.after_constraints,0))}${stat("MEASURED REDUCTIONS",pre.reductions === null || pre.reductions === undefined ? "N/A" : number(pre.reductions,0))}${stat("MODEL TYPE",escapeHtml(result.analysis.problem_type))}${stat("PARSING COMPLETED",milliseconds(timings.parse_time_ms))}${stat("PRESOLVE COMPLETED",milliseconds(timings.presolve_time_ms))}${stat("SELECTED METHOD",escapeHtml(configuration.method || metrics.method || "N/A"))}${stat("SELECTED BACKEND",escapeHtml(configuration.backend || metrics.backend || "N/A"))}</div></article>` : "";
   $("#resultArea").innerHTML = `<div class="result-area">
     <article class="panel pipeline">${["UPLOADED","PARSING","VALIDATING","CLASSIFYING","PRESOLVING","SELECTING","SOLVING","POSTSOLVING","VERIFYING","COMPLETE"].map(stage=>`<span class="stage done">${stage}</span>`).join("")}</article>
     <article class="panel result-top"><div class="result-status"><span class="status-orb ${cls}">${symbol}</span><div><h2 class="${headlineClass}">${escapeHtml(headline)}</h2><p>${escapeHtml(statusExplanation(result))}</p></div></div><div class="result-kpis"><div><label>OBJECTIVE</label><strong>${number(metrics.objective,6)}</strong></div><div><label>VERIFICATION</label><strong class="${result.verification === "PASS" ? "pass" : "warning"}">${escapeHtml(result.verification)}</strong></div><div><label>SOLVER TIME</label><strong>${milliseconds(timings.solver_time_ms)}</strong></div></div></article>
-    <div class="result-grid"><article class="panel timing-card"><h3>PERFORMANCE BREAKDOWN</h3>${timingRows.map(([label,value])=>`<div class="timing-row"><span>${label}</span><div class="timing-bar"><i style="width:${Math.max(3,value/largest*100)}%"></i></div><b>${milliseconds(value)}</b></div>`).join("")}<p class="solver-highlight">SOLVER TIME is measured inside the solver process. Backend total (${milliseconds(timings.backend_total_time_ms)}) is shown separately and includes the adapter process boundary.</p></article>
+    ${processedModel}
+    <div class="result-grid"><article class="panel timing-card"><h3>PERFORMANCE</h3>${timingRows.map(([label,value])=>`<div class="timing-row"><span>${label}</span><div class="timing-bar"><i style="width:${Math.max(3,value/largest*100)}%"></i></div><b>${milliseconds(value)}</b></div>`).join("")}<div class="timing-row"><span>Backend Total</span><b>${milliseconds(timings.backend_total_time_ms)}</b></div><p class="solver-highlight">Backend time measures the C++ solver process and excludes browser rendering.</p></article>
     <article class="panel verify-card"><h3>INDEPENDENT SOLUTION VERIFICATION</h3><div class="verify-stack"><div class="verify-row"><span>Original model verification</span><b class="${result.verification === "PASS"?"pass":"warning"}">${escapeHtml(result.verification)}</b></div>${verificationRow("Maximum constraint violation",metrics.feasibility)}${verificationRow("Primal residual",metrics.primal_residual)}${verificationRow("Dual residual",metrics.dual_residual)}${verificationRow("Integrality",result.analysis.problem_type==="MILP" ? result.verification : null)}${verificationRow("Objective consistency",metrics.objective !== null ? result.verification : null)}</div></article></div>
+    ${limited ? `<article class="panel presolve-card"><h3>${escapeHtml(humanStatus(result.status))}</h3><div class="stat-grid">${stat("CONFIGURED TIME LIMIT",`${number(configuration.time_limit_seconds,0)} s`)}${stat("ELAPSED TIME",seconds(timings.backend_total_time_ms === null ? null : timings.backend_total_time_ms / 1000))}${result.analysis.problem_type === "MILP" ? stat("MAX B&B NODES",configuration.max_nodes === 0 ? "Unlimited" : number(configuration.max_nodes,0)) : stat("MAXIMUM ITERATIONS",number(configuration.max_iterations,0))}${result.analysis.problem_type === "MILP" ? stat("MAX LP ITERATIONS / NODE",configuration.max_iterations === 0 ? "Unlimited" : number(configuration.max_iterations,0)) : ""}${result.analysis.problem_type === "MILP" ? stat("NODES PROCESSED",metrics.nodes_processed === null || metrics.nodes_processed === undefined ? "N/A" : number(metrics.nodes_processed,0)) : stat("ITERATIONS COMPLETED",metrics.iterations === null || metrics.iterations === undefined ? "N/A" : number(metrics.iterations,0))}${stat("LAST OBJECTIVE",metrics.objective === null || metrics.objective === undefined ? "N/A" : number(metrics.objective,6))}${stat("BACKEND",escapeHtml(configuration.backend || metrics.backend || "N/A"))}</div></article>` : ""}
     <article class="panel presolve-card"><h3>PRESOLVE TRANSFORMATION</h3><div class="presolve-flow"><div class="presolve-node"><p>BEFORE PRESOLVE</p><strong>${number(pre.before_variables,0)} vars · ${number(pre.before_constraints,0)} rows</strong></div><span class="presolve-arrow">→</span><div class="presolve-node"><p>AFTER PRESOLVE</p><strong>${number(pre.after_variables,0)} vars · ${number(pre.after_constraints,0)} rows</strong></div><span class="presolve-arrow">→</span><div class="presolve-node"><p>MEASURED REDUCTIONS</p><strong>${number(pre.reductions,0)}${reduction !== null ? ` · ${number(reduction,1)}% rows` : ""}</strong></div></div></article>
     ${milpPanel(metrics,result.analysis.problem_type)}
     <article class="panel table-card"><div class="table-toolbar explorer-heading"><div><p class="eyebrow">SOLUTION VARIABLES</p><h3>VARIABLE EXPLORER</h3><p id="variableStatus" class="file-meta"></p></div><div class="export-actions"><a class="export-button" href="/api/results/${encodeURIComponent(result.job_id)}/export?format=csv">EXPORT CSV</a><a class="export-button" href="/api/results/${encodeURIComponent(result.job_id)}/export?format=json">EXPORT JSON</a></div></div><div id="variableSummary" class="explorer-summary"></div><div id="keyVariables"></div><div class="explorer-controls"><div class="filter-chips"><button data-variable-filter="nonzero">NON-ZERO</button><button data-variable-filter="all">ALL</button><button data-variable-filter="integer">INTEGER</button><button data-variable-filter="binary">BINARY</button><button data-variable-filter="at-bound">AT BOUND</button><button data-variable-filter="fractional">FRACTIONAL</button></div><div class="explorer-selects"><select id="variableSort" class="select"><option value="absolute">Absolute value</option><option value="value">Value</option><option value="name">Variable name</option><option value="type">Type</option><option value="lower">Lower bound</option><option value="upper">Upper bound</option></select><select id="variableDirection" class="select"><option value="desc">Descending</option><option value="asc">Ascending</option></select><select id="variablePageSize" class="select"><option value="25">25 rows</option><option value="50">50 rows</option><option value="100">100 rows</option></select><input id="variableSearch" class="control search" placeholder="Search all variables" /></div></div><div class="benchmark-table-wrap"><table class="data-table"><thead><tr><th>VARIABLE</th><th>VALUE</th><th>TYPE</th><th>LOWER</th><th>UPPER</th><th>AT BOUND</th></tr></thead><tbody id="variableRows"></tbody></table></div><div id="variablePagination" class="variable-pagination"></div></article>
@@ -200,7 +283,7 @@ function renderVariableExplorer() {
   explorerState.page = Math.min(explorerState.page, totalPages);
   const slice = rows.slice((explorerState.page - 1) * explorerState.pageSize, explorerState.page * explorerState.pageSize);
   $("#variableSummary").innerHTML = explorerSummary(summary);
-  $("#variableStatus").textContent = explorerState.query ? `Search spans all ${number(summary.total,0)} solution variables · ${number(rows.length,0)} match${rows.length === 1 ? "" : "es"}` : `Showing ${number(rows.length,0)} ${explorerState.filter === "nonzero" ? "non-zero" : explorerState.filter.replace("-", " ")} variables · tolerance ${summary.zero_tolerance ?? "—"}`;
+  $("#variableStatus").textContent = summary.sparse ? `Showing ${number(rows.length,0)} non-zero variables; ${number(summary.zero,0)} zero values are omitted from the large-model response · tolerance ${summary.zero_tolerance}` : explorerState.query ? `Search spans all ${number(summary.total,0)} solution variables · ${number(rows.length,0)} match${rows.length === 1 ? "" : "es"}` : `Showing ${number(rows.length,0)} ${explorerState.filter === "nonzero" ? "non-zero" : explorerState.filter.replace("-", " ")} variables · tolerance ${summary.zero_tolerance ?? "—"}`;
   $$('[data-variable-filter]').forEach(button => button.classList.toggle("active", button.dataset.variableFilter === explorerState.filter));
   const key = [...explorerState.values].filter(row => isNumericValue(row.value) && Math.abs(row.value) > Number(summary.zero_tolerance || 1e-8)).sort((a,b) => Math.abs(b.value) - Math.abs(a.value)).slice(0, 8);
   $("#keyVariables").innerHTML = key.length ? `<div class="key-variables"><p>KEY SOLUTION VARIABLES</p>${key.map(row => `<span><b>${escapeHtml(row.name)}</b><em>${number(row.value,8)}</em></span>`).join("")}</div>` : "";

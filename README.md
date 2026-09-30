@@ -13,7 +13,7 @@ This is an experimental project, not yet a production replacement for mature sol
 - Mehrotra interior-point method (`ipm`)
 - Linear presolve, solution checks, and MPS input
 
-The current revised simplex implementation uses a dense tableau internally and is intended for small examples and development. It is not yet a sparse, large-scale revised-simplex implementation.
+Revised simplex uses a dense tableau for moderate models and switches to a sparse revised-simplex path when the estimated working matrix would be large. The sparse path keeps variable bounds and matrix rows sparse, avoiding the dense bound-row expansion that exhausted memory on supportcase6. It remains a prototype: difficult large LP relaxations may need many iterations, so this does not imply general-purpose large-MILP performance.
 
 ### Numerical linear algebra (NLA)
 
@@ -23,7 +23,7 @@ The current revised simplex implementation uses a dense tableau internally and i
 - Dense linear and KKT solve interfaces with dimension, pivot, finiteness, and residual checks
 - Centralized numerical tolerances
 
-The LP, QP, and dual-simplex paths use the shared CPU linear-solve layer; revised simplex and Mehrotra IPM also use shared vector operations. CSR is available as a reusable primitive, while current solver model construction still uses dense working matrices in several paths.
+The LP, QP, and dual-simplex paths use the shared CPU linear-solve layer; revised simplex and Mehrotra IPM also use shared vector operations. CSR is available as a reusable primitive; dense working matrices remain in several non-sparse paths.
 
 ### Quadratic programming (QP)
 
@@ -41,7 +41,11 @@ The QP path is experimental. General cross-term Hessians, free-variable transfor
 - Gomory cutting-plane path for supported pure-integer rows (`cutting-plane`)
 - Feasibility Pump heuristic (`feasibility-pump`)
 
-Branch-and-bound uses a simple best-bound search and first-fractional-variable branching. Gomory cut generation accepts only rows that pass its integer-validity checks; mixed-integer Gomory cuts and broader cut families are not implemented. Feasibility Pump is a heuristic: failure to find a candidate is not proof of MILP infeasibility. Cutting planes and the heuristic are not integrated into branch-and-bound.
+Branch-and-bound uses best-bound search and pseudocost-scored branching. It has independent branch-node and per-relaxation LP iteration budgets; zero means unlimited for each. Reaching either budget returns the matching `NODE_LIMIT` or `ITERATION_LIMIT` status instead of misreporting infeasibility or optimality, and preserves any verified incumbent and available gap data.
+
+The MPS reader builds sparse constraint rows directly, and the web analyzer streams large MPS uploads without constructing a duplicate in-memory optimization model. Large MILP responses use sparse primal output and omit zero-valued variables from the normal page payload; CSV export streams the complete vector. `scripts/generate_million_sparse_milp.py <output.mps>` creates a synthetic 1,000,001-binary-variable ingestion and solve smoke model. That model exercises a sparse case with one interacting variable; it is not a MIPLIB benchmark or evidence of general million-variable MILP performance.
+
+Gomory cut generation accepts only rows that pass its integer-validity checks; mixed-integer Gomory cuts and broader cut families are not implemented. Feasibility Pump is a heuristic: failure to find a candidate is not proof of MILP infeasibility. Cutting planes and the heuristic are not integrated into branch-and-bound.
 
 ## Repository layout
 
@@ -78,7 +82,7 @@ python -m venv .venv-web
 .\.venv-web\Scripts\python.exe -m uvicorn webui.app:app --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Build the C++ targets first. The dashboard supports the repository's `.mps`, `.json`, and `.txt` inputs, including Netlib EMPS/FMPS `.mps.txt` streams. EMPS is expanded in the job directory with the checked-in Netlib reference decoder before the existing parser and C++ solver run. Uploads are limited to 12 MB; expanded MPS output is limited to 96 MB. The adapter uses safe temporary files and subprocess argument arrays and enforces a configurable server-side time limit.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Build the C++ targets first. The dashboard supports the repository's `.mps`, `.json`, and `.txt` inputs, including Netlib EMPS/FMPS `.mps.txt` streams. EMPS is expanded in the job directory with the checked-in Netlib reference decoder before the existing parser and C++ solver run. Uploads are limited to 128 MB; expanded MPS output is limited to 96 MB. The adapter uses safe temporary files and subprocess argument arrays and enforces a configurable server-side time limit.
 
 Available API routes:
 
@@ -128,6 +132,9 @@ Examples below use the Linux executable path; substitute the Windows `.exe` path
 
 # Basic branch-and-bound
 ./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method milp --lp-method revised-simplex
+
+# Branch-and-bound node budget (0 means unlimited)
+./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method milp --max-nodes 100000
 
 # Gomory cutting-plane loop
 ./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method cutting-plane --max-cuts 100 --max-iterations 100

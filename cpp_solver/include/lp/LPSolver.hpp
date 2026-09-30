@@ -11,6 +11,7 @@
 #include <numeric>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace sovereign {
@@ -72,6 +73,85 @@ inline StandardLP standardize(const Model& m, const Tolerance& t={}, bool preser
         const auto objective=m.objective.find(s.map[j].first);
         const double c=objective==m.objective.end()?0.0:objective->second;
         s.c.push_back((s.maximize?1.0:-1.0)*c*s.map[j].second);
+    }
+    return s;
+}
+
+struct SparseStandardLP {
+    std::vector<std::vector<std::pair<std::size_t,double>>> A;
+    std::vector<double> b, c;
+    std::vector<std::pair<std::size_t,double>> map;
+    double constant{};
+    bool maximize{};
+};
+
+inline SparseStandardLP standardizeSparse(const Model& m, const Tolerance& t={}) {
+    (void)t;
+    SparseStandardLP s;
+    s.maximize = m.sense == Sense::Maximize;
+    std::vector<std::vector<std::pair<std::size_t,double>>> byOriginal(m.variables.size());
+    for (const auto& v : m.variables) if (v.active) {
+        auto addMap = [&](double scale) {
+            const std::size_t column = s.map.size();
+            s.map.emplace_back(v.originalId, scale);
+            if (v.originalId < byOriginal.size()) byOriginal[v.originalId].emplace_back(column, scale);
+        };
+        addMap(1.0);
+        if (!std::isfinite(v.lower)) addMap(-1.0);
+    }
+    auto addRow = [&](std::vector<std::pair<std::size_t,double>> row, double rhs) {
+        s.A.push_back(std::move(row));
+        s.b.push_back(rhs);
+    };
+    for (const auto& constraint : m.constraints) if (constraint.active) {
+        std::vector<std::pair<std::size_t,double>> row;
+        row.reserve(constraint.coefficients.size() * 2);
+        double rhs = constraint.rhs;
+        for (const auto& coefficient : constraint.coefficients) {
+            const auto id = coefficient.first;
+            if (id >= byOriginal.size()) continue;
+            if (std::isfinite(m.variables[id].lower)) rhs -= coefficient.second * m.variables[id].lower;
+            for (const auto& mapped : byOriginal[id])
+                row.emplace_back(mapped.first, coefficient.second * mapped.second);
+        }
+        if (constraint.relation == Relation::LessEqual) addRow(std::move(row), rhs);
+        else if (constraint.relation == Relation::GreaterEqual) {
+            for (auto& entry : row) entry.second = -entry.second;
+            addRow(std::move(row), -rhs);
+        } else {
+            addRow(row, rhs);
+            for (auto& entry : row) entry.second = -entry.second;
+            addRow(std::move(row), -rhs);
+        }
+    }
+    for (const auto& v : m.variables) if (v.active && std::isfinite(v.upper) && v.originalId < byOriginal.size()) {
+        std::vector<std::pair<std::size_t,double>> row;
+        for (const auto& mapped : byOriginal[v.originalId]) row.push_back(mapped);
+        addRow(std::move(row), std::isfinite(v.lower) ? v.upper - v.lower : v.upper);
+    }
+    for (std::size_t i = 0; i < s.A.size(); ++i) {
+        double scale = 0.0;
+        for (const auto& entry : s.A[i]) scale = std::max(scale, std::abs(entry.second));
+        if (scale > 0.0 && std::isfinite(scale)) {
+            for (auto& entry : s.A[i]) entry.second /= scale;
+            s.b[i] /= scale;
+        }
+    }
+    std::vector<double> columnScale(s.map.size(), 0.0);
+    for (const auto& row : s.A) for (const auto& entry : row)
+        columnScale[entry.first] = std::max(columnScale[entry.first], std::abs(entry.second));
+    for (std::size_t j = 0; j < s.map.size(); ++j) {
+        const double maxValue = columnScale[j];
+        const double multiplier = maxValue > 0.0 && std::isfinite(maxValue)
+            ? std::max(1e-12, std::min(1e12, 1.0 / maxValue)) : 1.0;
+        s.map[j].second *= multiplier;
+        columnScale[j] = multiplier;
+    }
+    for (auto& row : s.A) for (auto& entry : row) entry.second *= columnScale[entry.first];
+    for (const auto& mapped : s.map) {
+        const auto objective = m.objective.find(mapped.first);
+        const double coefficient = objective == m.objective.end() ? 0.0 : objective->second;
+        s.c.push_back((s.maximize ? 1.0 : -1.0) * coefficient * mapped.second);
     }
     return s;
 }
@@ -193,21 +273,32 @@ private:
         bool factor(std::vector<std::unordered_map<std::size_t,double>> a, double pivotTolerance) {
             size=a.size(); rows=std::move(a); permutation.resize(size);
             std::iota(permutation.begin(),permutation.end(),0);
+            std::vector<std::unordered_set<std::size_t>> columnRows(size);
+            for(std::size_t i=0;i<size;++i)for(const auto& item:rows[i])columnRows[item.first].insert(i);
             for(std::size_t k=0;k<size;++k) {
                 std::size_t p=k; double largest=0.0;
-                for(std::size_t i=k;i<size;++i) { auto it=rows[i].find(k); const double v=it==rows[i].end()?0.0:std::abs(it->second); if(v>largest){largest=v;p=i;} }
+                for(const std::size_t i:columnRows[k]) if(i>=k) { auto it=rows[i].find(k); const double v=it==rows[i].end()?0.0:std::abs(it->second); if(v>largest){largest=v;p=i;} }
                 if(!(largest>pivotTolerance)||!std::isfinite(largest)) {failedAt=k;failedPivot=largest;return false;}
-                if(p!=k){std::swap(rows[p],rows[k]);std::swap(permutation[p],permutation[k]);}
+                if(p!=k){
+                    for(const auto& item:rows[p])columnRows[item.first].erase(p);
+                    for(const auto& item:rows[k])columnRows[item.first].erase(k);
+                    std::swap(rows[p],rows[k]);std::swap(permutation[p],permutation[k]);
+                    for(const auto& item:rows[p])columnRows[item.first].insert(p);
+                    for(const auto& item:rows[k])columnRows[item.first].insert(k);
+                }
                 const double pivot=rows[k].at(k);
-                for(std::size_t i=k+1;i<size;++i) {
+                std::vector<std::size_t> affected;
+                affected.reserve(columnRows[k].size());
+                for(const std::size_t i:columnRows[k])if(i>k)affected.push_back(i);
+                for(const std::size_t i:affected) {
                     auto ik=rows[i].find(k); if(ik==rows[i].end()) continue;
                     const double multiplier=ik->second/pivot; ik->second=multiplier;
                     for(const auto& item:rows[k]) if(item.first>k) {
                         const std::size_t j=item.first; const double u=item.second;
                         auto ij=rows[i].find(j); const double old=ij==rows[i].end()?0.0:ij->second;
                         const double updated=old-multiplier*u;
-                        if(updated==0.0) {if(ij!=rows[i].end())rows[i].erase(ij);}
-                        else rows[i][j]=updated;
+                        if(updated==0.0) {if(ij!=rows[i].end()){rows[i].erase(ij);columnRows[j].erase(i);}}
+                        else {if(ij==rows[i].end())columnRows[j].insert(i);rows[i][j]=updated;}
                     }
                 }
             }
@@ -237,7 +328,7 @@ private:
     struct EtaUpdate { std::size_t row; std::vector<double> direction; };
     LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit) const {
         LPResult out; out.method=methodName(method);
-        StandardLP s=standardize(m,tol_);
+        SparseStandardLP s=standardizeSparse(m,tol_);
         const std::size_t n=s.c.size(), R=s.A.size();
         if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
         std::vector<bool> needsArtificial(R,false);
@@ -247,7 +338,7 @@ private:
         std::vector<SparseColumn> columns(total);
         for(std::size_t i=0;i<R;++i) {
             const double sign=needsArtificial[i]?-1.0:1.0;
-            for(std::size_t j=0;j<n;++j) if(s.A[i][j]!=0.0) columns[j].emplace_back(i,sign*s.A[i][j]);
+            for(const auto& entry:s.A[i]) if(entry.second!=0.0) columns[entry.first].emplace_back(i,sign*entry.second);
             columns[slackStart+i].emplace_back(i,sign);
         }
         std::vector<std::size_t> basis(R);
@@ -300,7 +391,7 @@ private:
                 std::size_t enter=total; double mostPositive=tol_.optimality, enterReduced=0.0;
                 for(std::size_t j=0;j<total;++j) {
                     if(basic[j] || artificial[j]) continue;
-                    double reduced=j<n?s.c[j]:0.0;
+                    double reduced=phaseOne?0.0:(j<n?s.c[j]:0.0);
                     for(const auto& e:columns[j]) reduced-=e.second*y[e.first];
                     if(reduced>tol_.optimality) {
                         if(reduced>mostPositive) { mostPositive=reduced; enter=j; enterReduced=reduced; }

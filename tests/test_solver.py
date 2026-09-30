@@ -51,6 +51,46 @@ constraint: limit: x + y <= 10
             with self.assertRaisesRegex(ValueError, "objective_sense"):
                 parse_problem_file(str(path))
 
+    def test_standard_qplib_txt_preserves_qp_matrix_and_bounds(self):
+        content = """QPLIB_TEST
+DCL
+minimize
+2
+1
+2
+1 1 2
+2 2 4
+0
+1
+1 3
+0
+2
+1 1 1
+1 2 2
+1e20
+0
+0
+0
+0
+-1e20
+1
+1 0
+1e20
+1
+2 5
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "QPLIB_TEST.qplib.txt"
+            path.write_text(content, encoding="utf-8")
+            model = parse_problem_file(str(path))
+        self.assertEqual(classify_model(model).problem_type, "QP")
+        self.assertEqual(len(model.variables), 2)
+        self.assertEqual(len(model.constraints), 1)
+        self.assertEqual(sum(len(row.coefficients) for row in model.constraints), 2)
+        self.assertEqual(model.quadratic_terms, {"x1": 2.0, "x2": 4.0})
+        self.assertEqual(model.bounds["x1"], (0.0, None))
+        self.assertEqual(model.bounds["x2"], (None, 5.0))
+
     def test_mps_lp(self):
         model = self._parse_mps("""NAME TESTLP
 ROWS

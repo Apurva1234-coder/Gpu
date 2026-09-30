@@ -1,0 +1,72 @@
+.solve-loading {
+  display: grid;
+  gap: 15px;
+}
+
+.solve-loading-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.solve-loading-head .eyebrow { margin-bottom: 6px; }
+.solve-loading h3 { color: var(--text); font: 700 16px var(--sans); margin: 0; }
+
+.solve-live-dot {
+  color: var(--mint);
+  border: 1px solid var(--line-hot);
+  border-radius: 99px;
+  padding: 5px 8px;
+  font: 9px var(--mono);
+  letter-spacing: .08em;
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
+.solve-progress {
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: #071421;
+  overflow: hidden;
+  box-shadow: inset 0 1px 8px rgba(0, 0, 0, .32);
+}
+
+.solve-progress i {
+  position: relative;
+  display: block;
+  width: 68%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #56cdb2 0%, #73d9bf 45%, #6eaaf0 100%);
+  box-shadow: 0 0 22px rgba(101, 216, 189, .38);
+  overflow: hidden;
+}
+
+.solve-progress i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .6), transparent);
+  animation: solveSweep 1.7s ease-in-out infinite;
+}
+
+.solve-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font: 10px var(--mono);
+  color: var(--muted);
+}
+
+.solve-progress-meta b { color: var(--mint); font-weight: 500; }
+.solve-loading p { margin: 0; }
+.solve-loading .export-button { justify-self: start; margin-top: 3px; }
+
+@keyframes solveSweep { to { transform: translateX(160%); } }
+@keyframes livePulse { 50% { opacity: .42; box-shadow: 0 0 18px rgba(101, 216, 189, .38); } }
+
+@media (max-width: 480px) {
+  .solve-loading-head, .solve-progress-meta { align-items: flex-start; flex-direction: column; }
+}

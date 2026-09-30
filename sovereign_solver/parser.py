@@ -28,12 +28,8 @@ def parse_problem_file(path: str):
                 "verify coefficient fidelity. Use a standard MPS copy; no conversion was attempted."
             )
         return parse_mps(text)
-    if Path(path).suffix.lower() == ".qplib" or first.startswith("QPLIB") or "QPLIB" in first:
-        try:
-            payload = parse_qplib(text)
-            return validate_payload(payload)
-        except Exception:
-            pass
+    if _looks_like_qplib(path, first):
+        return validate_payload(parse_qplib(text))
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -52,6 +48,12 @@ def _looks_like_netlib_emps(lines: list[str]) -> bool:
     return (len(first_stats) == 8 and len(second_stats) == 3
             and all(token.isdecimal() for token in first_stats + second_stats)
             and not any(token.upper() in {"ROWS", "COLUMNS", "RHS", "BOUNDS"} for token in lines[1:4]))
+
+
+def _looks_like_qplib(path: str, first_line: str) -> bool:
+    """Recognize QPLIB content and conventional compound names such as .qplib.txt."""
+    name = Path(path).name.lower()
+    return first_line.startswith("QPLIB") or name.endswith(".qplib") or name.endswith(".qplib.txt")
 
 
 def _parse_text(text: str) -> Dict:

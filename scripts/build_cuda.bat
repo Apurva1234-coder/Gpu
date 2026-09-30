@@ -1,13 +1,23 @@
 @echo off
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0
-set "PATH=C:\Program Files\CMake\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4\bin;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64;C:\Users\Devansh\AppData\Roaming\Python\Python314\Scripts;%PATH%"
+setlocal
 
-if exist cpp_solver\build-cuda rmdir /s /q cpp_solver\build-cuda
+rem Builds the optional CUDA solver without modifying the working CPU build.
+set "VSROOT=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools"
+set "CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
+set "HOST_COMPILER=%VSROOT%\VC\Tools\MSVC\14.29.30133\bin\Hostx64\x64"
 
-cmake -S cpp_solver -B cpp_solver\build-cuda -G Ninja -DCMAKE_MAKE_PROGRAM="C:/Users/Devansh/AppData/Roaming/Python/Python314/Scripts/ninja.exe" -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER=cl -DSOVEREIGN_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+if not exist "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" (
+  echo MSVC Build Tools 2019 were not found.
+  exit /b 1
+)
+if not exist "%CUDA_ROOT%\bin\nvcc.exe" (
+  echo CUDA Toolkit 13.1 was not found.
+  exit /b 1
+)
 
-cmake --build cpp_solver\build-cuda --config Release
-if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+if not exist cpp_solver\build-cuda mkdir cpp_solver\build-cuda
+"%CUDA_ROOT%\bin\nvcc.exe" -std=c++17 -O2 -DNDEBUG -allow-unsupported-compiler -ccbin "%HOST_COMPILER%" -DSOVEREIGN_HAS_CUDA=1 -I cpp_solver\include cpp_solver\src\main.cpp cpp_solver\cuda\CudaBackend.cu -o cpp_solver\build-cuda\sovereign_presolve_cli.exe -lcublas -lcusparse -lcusolver
+if errorlevel 1 exit /b 1
 
-echo === CUDA Build Succeeded ===
+echo CUDA solver built: cpp_solver\build-cuda\sovereign_presolve_cli.exe

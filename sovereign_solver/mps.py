@@ -8,7 +8,7 @@ def parse_mps(text: str):
         raise ValueError("MPS input must begin with a NAME section.")
     section = None
     name = lines[0].split(maxsplit=1)[1].strip() if len(lines[0].split()) > 1 else "MPS problem"
-    rows, columns, rhs, ranges, bounds = {}, {}, {}, {}, {}
+    rows, columns, row_coefficients, rhs, ranges, bounds = {}, {}, {}, {}, {}, {}
     objective_row = None
     integer_vars = set()
     binary_vars = set()
@@ -45,6 +45,7 @@ def parse_mps(text: str):
                 if row not in rows:
                     raise ValueError(f"MPS column references unknown row '{row}'.")
                 columns.setdefault(variable, {})[row] = columns.setdefault(variable, {}).get(row, 0) + value
+                row_coefficients.setdefault(row, {})[variable] = columns[variable][row]
         elif section == "RHS":
             if len(tokens) < 3:
                 raise ValueError(f"Invalid MPS RHS record: {raw.strip()}")
@@ -105,7 +106,7 @@ def parse_mps(text: str):
     for row, row_type in rows.items():
         if row_type == "N": continue
         operator = {"E": "=", "L": "<=", "G": ">="}[row_type]
-        coefficients = {variable: entries[row] for variable, entries in columns.items() if row in entries}
+        coefficients = dict(row_coefficients.get(row, {}))
         row_rhs = rhs.get(row, 0.0)
         if row not in ranges:
             data["constraints"].append({"name": row, "coefficients": coefficients, "operator": operator, "rhs": row_rhs})
