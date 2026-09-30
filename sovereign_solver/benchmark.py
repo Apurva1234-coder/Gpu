@@ -33,7 +33,7 @@ CSV_FIELDS = [
     "number_of_constraints", "number_of_nonzeros", "solver_method", "backend",
     "presolve_enabled", "status", "objective_value", "best_primal_bound",
     "best_dual_bound", "absolute_gap", "relative_gap", "iterations", "lp_solves",
-    "nodes_created", "nodes_processed", "nodes_pruned", "parse_time_ms",
+    "nodes_created", "nodes_processed", "nodes_pruned", "parse_time_ms", "model_preparation_time_ms",
     "presolve_time_ms", "solve_time_ms", "postsolve_time_ms",
     "verification_time_ms", "total_time_ms", "primal_residual", "dual_residual",
     "complementarity_residual", "integer_feasible", "verification_pass",
@@ -153,7 +153,7 @@ def verify_original(model, primal: list[float] | None, tolerance: float = 1e-7,
 def _method_for(problem_class: str, method: str) -> tuple[list[str], str]:
     if method == "auto":
         method = {"LP": "revised-simplex", "MILP": "milp", "QP": "qp"}.get(problem_class, "auto")
-    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm"}:
+    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm", "pdhg"}:
         return ["--method", "milp", "--lp-method", method], "branch-and-bound/" + method
     return ["--method", method], method
 
@@ -269,7 +269,7 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
                     while chunk := compressed.read(1024 * 1024):
                         expanded.write(chunk)
             except (OSError, EOFError) as exc:
-                return {"status": "UNSUPPORTED", "raw_status": "UNSUPPORTED", "solve_time_ms": 0.0,
+                return {"status": "UNSUPPORTED", "raw_status": "UNSUPPORTED", "solve_time_ms": None,
                         "timed_out": False, "failure_reason": f"cannot decompress gzip benchmark input: {exc}", "primal": None}
             solver_instance = staged
         command = [str(solver), "--input", str(solver_instance), *method_args, "--backend", backend, "--device", str(device)]
@@ -281,10 +281,10 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
             elapsed = (time.perf_counter_ns() - start) / 1e6
             output = proc.stdout + "\n" + proc.stderr
             result = _parse_solver_output(output, proc.returncode)
-            parse_ms = _first_number(_field(output, "Parse time ms")) or 0.0
-            presolve_ms = _first_number(_field(output, "Presolve time ms")) or 0.0
+            parse_ms = _first_number(_field(output, "Parse time ms"))
+            presolve_ms = _first_number(_field(output, "Presolve time ms"))
             reported_solve_ms = _first_number(_field(output, "Solve time ms"))
-            result.update({"solve_time_ms": reported_solve_ms if reported_solve_ms is not None else max(0.0, elapsed - parse_ms - presolve_ms),
+            result.update({"solve_time_ms": reported_solve_ms,
                            "postsolve_time_ms": _first_number(_field(output, "Postsolve time ms")),
                            "cli_verification_time_ms": _first_number(_field(output, "Verification time ms")), "cli_time_ms": elapsed,
                            "build_compiler": _field(output, "Build compiler"),
@@ -296,7 +296,8 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
             return result
         except subprocess.TimeoutExpired as exc:
             elapsed = (time.perf_counter_ns() - start) / 1e6
-            return {"status": "TIME_LIMIT", "raw_status": "TIME_LIMIT", "solve_time_ms": elapsed,
+            return {"status": "TIME_LIMIT", "raw_status": "TIME_LIMIT", "solve_time_ms": None,
+                    "total_time_ms": elapsed,
                     "stdout": (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
                     "stderr": (exc.stderr or b"").decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
                     "returncode": None, "timed_out": True, "failure_reason": f"per-instance time limit of {timeout:g} seconds exceeded",
@@ -497,6 +498,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                         "number_of_constraints": nrow, "number_of_nonzeros": nnz,
                         "family": family, "solver_method": effective_method, "backend": effective_backend,
                         "presolve_enabled": not args.no_presolve, "parse_time_ms": parsed_ms,
+                        "model_preparation_time_ms": parsed_ms,
                         "gpu_used": args.backend == "cuda" and gpu["available"],
                         "presolve_applied_to_solve": classification == "LP"})
             if classification == "QP" and method_args != ["--method", "qp"]:
@@ -504,12 +506,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm"}:
+            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not an LP method"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
+            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not supported for MILP"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
@@ -564,11 +566,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 external_rows.append(reference)
                 row["reference_solver_status"] = reference.get("reference_solver_status")
             if args.compare_backends:
-                gpu_supported = classification == "QP" or (classification == "LP" and args.method == "ipm")
+                gpu_supported = classification == "QP" or (classification == "LP" and args.method in {"ipm", "pdhg"})
                 pair = {"dataset": args.dataset, "instance": str(path), "supported": gpu_supported,
                         "gpu_available": gpu["available"], "gpu_device": gpu["device"], "gpu_used": False,
                         "status": "GPU_UNSUPPORTED" if not gpu_supported else "NOT_AVAILABLE" if not gpu["available"] else None,
-                        "gpu_reason": "CUDA KKT kernels are supported for IPM/QP only" if not gpu_supported else ""}
+                        "gpu_reason": "CUDA kernels are supported for IPM/QP and PDHG LP only" if not gpu_supported else ""}
                 if gpu_supported and gpu["available"]:
                     cpu = _invoke(solver, path, method_args, "cpu", args.device, args.time_limit, no_presolve=args.no_presolve)
                     cuda = _invoke(solver, path, method_args, "cuda", args.device, args.time_limit, no_presolve=args.no_presolve)
@@ -608,7 +610,27 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                         "parse_time_ms": (time.perf_counter_ns() - parse_start) / 1e6})
         if row["total_time_ms"] is None:
             row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
+        row["timing"] = {
+            "parsing_ms": row.get("parse_time_ms"),
+            "model_preparation_ms": row.get("model_preparation_time_ms"),
+            "presolve_ms": row.get("presolve_time_ms"),
+            "solver_ms": row.get("solve_time_ms"),
+            "postsolve_ms": row.get("postsolve_time_ms"),
+            "verification_ms": row.get("verification_time_ms"),
+            "backend_total_ms": row.get("total_time_ms"),
+        }
         rows.append(row)
+
+    for row in rows:
+        row.setdefault("timing", {
+            "parsing_ms": row.get("parse_time_ms"),
+            "model_preparation_ms": row.get("model_preparation_time_ms"),
+            "presolve_ms": row.get("presolve_time_ms"),
+            "solver_ms": row.get("solve_time_ms"),
+            "postsolve_ms": row.get("postsolve_time_ms"),
+            "verification_ms": row.get("verification_time_ms"),
+            "backend_total_ms": row.get("total_time_ms"),
+        })
 
     metadata = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), "dataset": args.dataset,
                 "input_dir": str(root.resolve()), "solver_path": str(solver.resolve()), "solver_version": "Sovereign prototype (working tree)",
@@ -679,7 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True, choices=("netlib", "miplib", "qplib", "mittelmann", "examples", "custom"))
     parser.add_argument("--input", required=True, help="Directory containing locally available instances")
     parser.add_argument("--solver", required=True, help="Path to sovereign_presolve_cli executable")
-    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
+    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
     parser.add_argument("--backend", default="cpu", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--tier", choices=("quick", "standard", "full"), default="quick")

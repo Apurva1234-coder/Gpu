@@ -25,6 +25,8 @@ Revised simplex uses a dense tableau for moderate models and switches to a spars
 
 The LP, QP, and dual-simplex paths use the shared CPU linear-solve layer; revised simplex and Mehrotra IPM also use shared vector operations. CSR is available as a reusable primitive; dense working matrices remain in several non-sparse paths.
 
+Automatic LP runs use no iteration or wall-clock time cap (`0` means unlimited), for both the sparsity-routed PDHG path and CPU Revised Simplex. The solver stops when it reaches its own terminal status; this does not guarantee that every unsupported, infeasible, unbounded, or numerically difficult input will yield an optimal solution. QP and MILP retain their separate automatic iteration/node budgets.
+
 ### Quadratic programming (QP)
 
 - QP classification and Hessian convexity check
@@ -98,7 +100,27 @@ GET  /api/results/{id}
 GET  /api/benchmarks
 ```
 
-`solver_time_ms` is always sourced from the C++ CLI's `Solve time ms` field. `backend_total_time_ms` is separately reported by the adapter and is never shown as solver time.
+### Timing and telemetry
+
+Every solve reports measured stage durations in milliseconds. The API keeps the raw values in `timings` for backwards compatibility and also returns the canonical `timing` object:
+
+```ts
+timing: {
+  parsing_ms: number | null,
+  model_preparation_ms: number | null,
+  presolve_ms: number | null,
+  solver_ms: number | null,
+  postsolve_ms: number | null,
+  verification_ms: number | null,
+  backend_total_ms: number | null
+}
+```
+
+- `solver_ms` is measured around the selected optimization algorithm itself. It excludes parsing, model preparation, presolve, postsolve, verification, and browser/network time. CUDA execution synchronizes the active stream before the timer stops.
+- `parsing_ms`, `presolve_ms`, `postsolve_ms`, and `verification_ms` come from their measured execution stages. A stage that did not run is `null`/shown as `—` rather than filled with an estimate.
+- `model_preparation_ms` records backend-side model preparation performed before the C++ solve process. `backend_total_ms` measures backend processing and orchestration, including preparation and the solver request; it is not used as a substitute for solver time.
+- A solver timeout or external process kill preserves the measured backend elapsed time. `solver_ms` remains unavailable if the solver process did not return its internal timing.
+- The Sovereign solver duration is the same in solve results, benchmark comparisons, and recorded benchmark JSON. The benchmark also stores the raw millisecond values; the UI displays milliseconds below 1,000 ms and seconds at or above 1,000 ms.
 
 Run the C++ tests with:
 
@@ -212,7 +234,7 @@ python -m sovereign_solver.benchmark --dataset miplib --input benchmarks/miplib 
 python -m sovereign_solver.benchmark --dataset qplib --input benchmarks/qplib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --method qp --compare-backends
 ```
 
-Tiers are `quick` (up to 10 files), `standard` (up to 50), and `full` (all discovered files); `--limit N` overrides a tier. The default time limit is 60 seconds per solver invocation. Results go to `results/` by default and can be redirected with `--output-dir`. Useful options include `--method auto|revised-simplex|dual-simplex|ipm|qp|milp|lp-relaxation|cutting-plane|feasibility-pump`, `--backend cpu|cuda|auto`, `--objective-tol`, `--feasibility-tol`, `--compare-highs`, `--compare-presolve`, and `--compare-backends`. LP methods are passed as `--lp-method` within the existing branch-and-bound path for MILPs.
+Tiers are `quick` (up to 10 files), `standard` (up to 50), and `full` (all discovered files); `--limit N` overrides a tier. The default time limit is 60 seconds per solver invocation. Results go to `results/` by default and can be redirected with `--output-dir`. Useful options include `--method auto|revised-simplex|dual-simplex|ipm|pdhg|qp|milp|lp-relaxation|cutting-plane|feasibility-pump`, `--backend cpu|cuda|auto`, `--objective-tol`, `--feasibility-tol`, `--compare-highs`, `--compare-presolve`, and `--compare-backends`. LP methods are passed as `--lp-method` within the existing branch-and-bound path for MILPs.
 
 Suggested local input layout:
 
@@ -233,7 +255,7 @@ Examples available in the repository can be benchmarked immediately with `--data
 
 ## Current scope
 
-- Revised and dual simplex, presolve, MILP search, cut generation, and solver control logic remain CPU implementations. CUDA accelerates supported numerical kernels in the LP/QP interior-point paths.
+- Revised and dual simplex, presolve, MILP search, cut generation, and solver control logic remain CPU implementations. PDHG supports continuous LPs and can keep sparse matrices and iteration vectors resident on CUDA. Automatic LP routing branches on sparsity alone: at least 90% sparsity selects PDHG (CUDA when available); lower sparsity selects CPU Revised Simplex. Automatic PDHG failures fall back to Revised Simplex.
 - No MIQP, nonlinear optimization, branch-and-cut integration, advanced MILP cuts, parallel search, or learned methods.
 - Solver methods are prototypes; numerical robustness and scalability need further work.
 - A heuristic result is not an optimality certificate. Interpret each method's status and verification output accordingly.
@@ -251,8 +273,8 @@ cmake --build build-cuda --config Release
 build-cuda\sovereign_presolve_cli.exe --device-info
 ```
 
-The backend provides a reusable CUDA context/stream, cuBLAS AXPY/dot/dense GEMV, cuSPARSE CSR SpMV, and cuSOLVER dense LU solves. Dense KKT solves used by LP/QP interior-point methods run through cuSOLVER when CUDA is selected; equilibration, system assembly, residual checks, and the remaining solver logic run on the CPU. The current matrix/vector API transfers working data for each operation, so this is functional CUDA execution rather than a claim of end-to-end device residency or guaranteed speedup.
+The backend provides a reusable CUDA context/stream, cuBLAS AXPY/dot/dense GEMV, cuSPARSE CSR SpMV, and cuSOLVER dense LU solves. Dense KKT solves used by LP/QP interior-point methods run through cuSOLVER when CUDA is selected. PDHG's sparse matrix and iteration vectors stay on the device; primal and dual vectors are copied to the host periodically for residual checks and final independent verification.
 
-Use `--backend cpu|cuda|auto` on solver runs. `cpu` is the default. `cuda` requires a working CUDA build and device, and `--device N` selects the NVIDIA device. `auto` selects CUDA for sufficiently large repeated interior-point workloads; simplex and other CPU-only methods stay on CPU. The CLI prints the selected numerical backend. A CUDA-enabled build requires a C++17 compiler supported by the installed CUDA Toolkit, CMake 3.16+, and NVIDIA cuBLAS, cuSPARSE, and cuSOLVER libraries.
+Use `--backend cpu|cuda|auto` on solver runs. `cpu` is the default. `cuda` requires a working CUDA build and device, and `--device N` selects the NVIDIA device. `auto` selects CUDA for sufficiently large repeated interior-point workloads and sparse PDHG LP runs; simplex and other CPU-only methods stay on CPU. The CLI prints the selected numerical backend. A CUDA-enabled build requires a C++17 compiler supported by the installed CUDA Toolkit, CMake 3.16+, and NVIDIA cuBLAS, cuSPARSE, and cuSOLVER libraries.
 
 If CUDA is unavailable, configure without `SOVEREIGN_ENABLE_CUDA`; the same CLI reports `CUDA Available: NO` and all existing CPU functionality remains available.

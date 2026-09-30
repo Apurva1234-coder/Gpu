@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 
+class UnsupportedQPLIBFeature(ValueError):
+    """A recognized QPLIB model uses a feature the solver cannot represent."""
+
+
 @dataclass
 class _QPLIBLines:
     values: list[str]
@@ -59,7 +63,7 @@ def parse_qplib(text: str) -> Dict[str, Any]:
     """Parse a continuous QPLIB model with linear constraints.
 
     The solver stores a diagonal Hessian, so off-diagonal objective terms and
-    quadratic constraints receive a clear format error instead of being lost.
+    quadratic constraints are reported as unsupported instead of being lost.
     """
     reader = _QPLIBLines(_clean_lines(text))
     if not reader.values:
@@ -96,7 +100,10 @@ def parse_qplib(text: str) -> Dict[str, Any]:
         if not (1 <= row <= n_vars and 1 <= column <= n_vars):
             raise ValueError(f"QPLIB quadratic objective term {term_index + 1} references an invalid variable index.")
         if row != column:
-            raise ValueError("QPLIB off-diagonal quadratic objectives are not supported by this solver.")
+            raise UnsupportedQPLIBFeature(
+                "QPLIB off-diagonal quadratic objective terms require full-Hessian QP support; "
+                "the current solver only supports diagonal quadratic objectives."
+            )
         if value:
             key = f"x{row}"
             quadratic_terms[key] = quadratic_terms.get(key, 0.0) + value

@@ -70,7 +70,7 @@ public:
                 }
             }
             Model projection = makeProjection(original, candidate, ints);
-            LPMethod projectionMethod = method == LPMethod::DualSimplex ? LPMethod::DualSimplex : LPMethod::RevisedSimplex;
+            LPMethod projectionMethod = method;
             LPResult projected = LPSolver{}.solve(projection, projectionMethod, lpIterationLimit_);
             ++r.projections;
             if (projected.status != LPStatus::Optimal) {

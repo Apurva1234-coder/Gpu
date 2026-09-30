@@ -15,21 +15,28 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from sovereign_solver.classification import classify_model
+from sovereign_solver.comparison import comparator_availability, solve_comparator
 from sovereign_solver.parser import parse_problem_file
-from sovereign_solver.qplib import parse_qplib
+from sovereign_solver.qplib import UnsupportedQPLIBFeature, parse_qplib
 from webui.solver_policy import SolverPolicy
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).resolve().parent / "static"
 MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_MPS_BYTES = 96 * 1024 * 1024
+DATASET_ROOT = ROOT / "datasets"
+DATASET_PROBLEM_TYPES = ("lp", "milp", "qp")
+DATASET_SIZES = ("small", "medium", "large")
+HIDDEN_DEMO_DATASET_IDS = {"qp/medium/qplib_8906"}
+DATASET_ANALYSIS_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
+DATASET_CACHE_LOCK = threading.Lock()
 SOLUTION_ZERO_TOLERANCE = 1e-8
 ALLOWED_EXTENSIONS = {".mps", ".json", ".txt", ".qplib"}
 JOBS: dict[str, dict[str, Any]] = {}
@@ -123,6 +130,9 @@ def _convert_qplib_to_json(source: Path, directory: Path) -> Path:
     try:
         payload = parse_qplib(source.read_text(encoding="utf-8"))
         destination.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    except UnsupportedQPLIBFeature as exc:
+        destination.unlink(missing_ok=True)
+        raise UnsupportedQPLIBFeature(str(exc)) from exc
     except (OSError, UnicodeError, ValueError) as exc:
         destination.unlink(missing_ok=True)
         raise ValueError(f"QPLIB parsing failed: {exc}") from exc
@@ -418,6 +428,50 @@ def _prepare_model(model_path: Path, directory: Path) -> tuple[Path, dict[str, A
     return solver_path, summary
 
 
+def _dataset_entries(problem_type: str | None = None) -> list[dict[str, Any]]:
+    """Discover checked-in datasets from datasets/<type>/<size>/<file>."""
+    entries: list[dict[str, Any]] = []
+    problem_types = (problem_type,) if problem_type else DATASET_PROBLEM_TYPES
+    for current_type in problem_types:
+        if current_type not in DATASET_PROBLEM_TYPES:
+            continue
+        for size in DATASET_SIZES:
+            directory = DATASET_ROOT / current_type / size
+            if not directory.is_dir():
+                continue
+            for source in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+                if not source.is_file() or source.suffix.lower() not in ALLOWED_EXTENSIONS:
+                    continue
+                relative_id = source.relative_to(DATASET_ROOT).with_suffix("").as_posix()
+                if relative_id.lower() in HIDDEN_DEMO_DATASET_IDS:
+                    continue
+                entries.append({
+                    "id": relative_id,
+                    "problem_type": current_type.upper(),
+                    "size": size,
+                    "name": source.stem.upper(),
+                    "file_name": source.name,
+                    "path": source,
+                })
+    return entries
+
+
+def _analyze_job_file(model_path: Path, directory: Path) -> tuple[str, dict[str, Any]]:
+    preparation_started = time.perf_counter()
+    solver_path, summary = _prepare_model(model_path, directory)
+    preparation_time_ms = (time.perf_counter() - preparation_started) * 1000
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {
+        "directory": directory,
+        "path": solver_path,
+        "source_path": model_path,
+        "analysis": summary,
+        "preparation_time_ms": preparation_time_ms,
+        "state": "analyzed",
+    }
+    return job_id, summary
+
+
 def _capture(pattern: str, output: str, default: Any = None, cast: type = str) -> Any:
     match = re.search(pattern, output, re.MULTILINE | re.IGNORECASE)
     if not match:
@@ -440,6 +494,16 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "postsolve_time_ms": _capture(r"^Postsolve time ms:\s*([^\r\n]+)$", output, None, float),
         "verification_time_ms": _capture(r"^Verification time ms:\s*([^\r\n]+)$", output, None, float),
         "backend_total_time_ms": total_ms,
+        "model_preparation_time_ms": None,
+    }
+    timing = {
+        "parsing_ms": timings["parse_time_ms"],
+        "model_preparation_ms": timings["model_preparation_time_ms"],
+        "presolve_ms": timings["presolve_time_ms"],
+        "solver_ms": timings["solver_time_ms"],
+        "postsolve_ms": timings["postsolve_time_ms"],
+        "verification_ms": timings["verification_time_ms"],
+        "backend_total_ms": timings["backend_total_time_ms"],
     }
     names = (_capture(r"^Primal Names:\s*(.*)$", output, "") or "").split()
     primal_line = _capture(r"^Primal:\s*(.*)$", output, "") or ""
@@ -494,7 +558,23 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "message": _capture(r"^Message:[ \t]*([^\r\n]*)$", output, None),
         "convexity": _capture(r"^Hessian:\s*(.+)$", output, None),
     }
-    return {"status": status, "verification": verification, "timings": timings, "metrics": metrics, "presolve": presolve, "variables": variables, "sparse_primal": sparse_variables is not None, "raw_log": output[-16000:]}
+    return {"status": status, "verification": verification, "timings": timings, "timing": timing, "metrics": metrics, "presolve": presolve, "variables": variables, "sparse_primal": sparse_variables is not None, "raw_log": output[-16000:]}
+
+
+def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | None = None) -> None:
+    """Keep public timing data and legacy UI fields on one measured source."""
+    timings = result.setdefault("timings", {})
+    if backend_total_ms is not None:
+        timings["backend_total_time_ms"] = backend_total_ms
+    result["timing"] = {
+        "parsing_ms": timings.get("parse_time_ms"),
+        "model_preparation_ms": timings.get("model_preparation_time_ms"),
+        "presolve_ms": timings.get("presolve_time_ms"),
+        "solver_ms": timings.get("solver_time_ms"),
+        "postsolve_ms": timings.get("postsolve_time_ms"),
+        "verification_ms": timings.get("verification_time_ms"),
+        "backend_total_ms": timings.get("backend_total_time_ms"),
+    }
 
 
 def _solution_variables(parsed: list[dict[str, Any]], metadata: list[dict[str, Any]], sparse: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -589,7 +669,7 @@ def device_info() -> dict[str, Any]:
 
 class SolveRequest(BaseModel):
     job_id: str
-    method: str = Field(default="auto", pattern="^(auto|revised-simplex|dual-simplex|ipm|qp|milp|lp-relaxation|cutting-plane|feasibility-pump)$")
+    method: str = Field(default="auto", pattern="^(auto|revised-simplex|dual-simplex|ipm|pdhg|qp|milp|lp-relaxation|cutting-plane|feasibility-pump)$")
     backend: str = Field(default="auto", pattern="^(auto|cpu|cuda)$")
     presolve: bool = True
     max_iterations: int = Field(default=10000, ge=0, le=10_000_000)
@@ -627,13 +707,20 @@ def capabilities() -> dict[str, Any]:
         "formats": sorted(extension.removeprefix(".") for extension in ALLOWED_EXTENSIONS),
         "problem_types": ["LP", "QP", "MILP"],
         "methods": {
-            "LP": ["revised-simplex", "dual-simplex", "ipm"],
+            "LP": ["revised-simplex", "dual-simplex", "ipm", "pdhg"],
             "QP": ["qp"],
             "MILP": ["milp", "cutting-plane", "feasibility-pump", "lp-relaxation"],
         },
         "cuda_available": info["cuda_available"],
         "cuda_reason": info["cuda_reason"],
-        "automatic_execution_policy": {"time_limits_seconds": [0], "iteration_limits": [10000, 25000, 50000], "node_limits": [10000, 100000, 500000], "zero_means_unlimited": True},
+        "automatic_execution_policy": {
+            "time_limits_seconds": [0],
+            "lp_iteration_limits": [0],
+            "qp_iteration_limits": [200],
+            "milp_lp_iteration_limits": [10000, 25000, 50000],
+            "milp_node_limits": [10000, 100000, 500000],
+            "zero_means_unlimited": True,
+        },
         "max_iterations": {"default": 10000, "zero_means_unlimited": True},
         "max_nodes": {"default": 10000, "zero_means_unlimited": True},
     }
@@ -652,11 +739,62 @@ async def analyze(file: UploadFile = File(...)) -> dict[str, Any]:
     model_path = directory / _safe_name(file.filename or f"model{suffix}")
     model_path.write_bytes(payload)
     try:
-        solver_path, summary = _prepare_model(model_path, directory)
+        job_id, summary = _analyze_job_file(model_path, directory)
+    except UnsupportedQPLIBFeature as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(422, f"Unsupported QPLIB model: {exc}") from exc
     except ValueError as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(422, f"Model parsing failed: {exc}") from exc
-    JOBS[job_id] = {"directory": directory, "path": solver_path, "source_path": model_path, "analysis": summary, "state": "analyzed"}
+    return {"job_id": job_id, "analysis": _public_analysis(summary)}
+
+
+@app.get("/api/datasets")
+def list_builtin_datasets(problem_type: str | None = None) -> dict[str, Any]:
+    """Return real parser-derived summaries for datasets currently present on disk."""
+    selected_type = problem_type.lower() if problem_type else None
+    if selected_type is not None and selected_type not in DATASET_PROBLEM_TYPES:
+        raise HTTPException(422, "Problem type must be LP, MILP, or QP.")
+    datasets: list[dict[str, Any]] = []
+    for entry in _dataset_entries(selected_type):
+        item = {key: value for key, value in entry.items() if key != "path"}
+        try:
+            source_stat = entry["path"].stat()
+            cache_key = (str(entry["path"].resolve()), source_stat.st_mtime_ns, source_stat.st_size)
+            with DATASET_CACHE_LOCK:
+                cached = DATASET_ANALYSIS_CACHE.get(cache_key)
+            if cached is None:
+                with tempfile.TemporaryDirectory(prefix="sovereign-dataset-stats-") as temporary:
+                    _, analysis = _prepare_model(entry["path"], Path(temporary))
+                cached = {"analysis": _public_analysis(analysis), "available": True}
+                with DATASET_CACHE_LOCK:
+                    DATASET_ANALYSIS_CACHE[cache_key] = cached
+            item.update(cached)
+        except (OSError, ValueError, UnicodeError) as exc:
+            item["analysis"] = None
+            item["available"] = False
+            item["error"] = str(exc)
+        datasets.append(item)
+    return {"datasets": datasets, "problem_types": [kind.upper() for kind in DATASET_PROBLEM_TYPES]}
+
+
+@app.post("/api/datasets/{problem_type}/{size}/{dataset_name}/analyze")
+def analyze_builtin_dataset(problem_type: str, size: str, dataset_name: str) -> dict[str, Any]:
+    dataset_id = f"{problem_type.lower()}/{size.lower()}/{dataset_name.lower()}"
+    entry = next((item for item in _dataset_entries(problem_type.lower()) if item["id"].lower() == dataset_id), None)
+    if entry is None:
+        raise HTTPException(404, "Built-in dataset was not found.")
+    directory = Path(tempfile.mkdtemp(prefix="sovereign-dataset-"))
+    destination = directory / _safe_name(entry["file_name"])
+    try:
+        shutil.copy2(entry["path"], destination)
+        job_id, summary = _analyze_job_file(destination, directory)
+    except UnsupportedQPLIBFeature as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(422, f"Built-in model unsupported: {exc}") from exc
+    except (OSError, ValueError, UnicodeError) as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(422, f"Built-in model parsing failed: {exc}") from exc
     return {"job_id": job_id, "analysis": _public_analysis(summary)}
 
 
@@ -676,11 +814,10 @@ def load_example(example_name: str) -> dict[str, Any]:
     destination = directory / source.name
     shutil.copy2(source, destination)
     try:
-        solver_path, summary = _prepare_model(destination, directory)
+        job_id, summary = _analyze_job_file(destination, directory)
     except ValueError as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(422, f"Model parsing failed: {exc}") from exc
-    JOBS[job_id] = {"directory": directory, "path": solver_path, "source_path": destination, "analysis": summary, "state": "analyzed"}
     return {"job_id": job_id, "analysis": _public_analysis(summary)}
 
 
@@ -688,7 +825,15 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
     global ACTIVE_SOLVER_PROCESS, ACTIVE_SOLVER_JOB_ID
     if job.get("state") == "cancelled":
         raise HTTPException(409, "This model's previous run was cancelled and its temporary input was removed. Upload or select the model again before starting a new solve.")
+    started = time.perf_counter()
     info = device_info()
+    # The API's generic `method=auto` route is also an automatic upload path.
+    # Do not let SolveRequest's expert-mode default reintroduce an LP cap.
+    if configuration.get("method") == "auto" and str(job["analysis"].get("problem_type", "")).upper() == "LP":
+        configuration["max_iterations"] = 0
+    if configuration["backend"] == "auto":
+        cuda_method = configuration["method"] in {"pdhg", "ipm", "qp"}
+        configuration["backend"] = "cuda" if cuda_method and info["cuda_available"] else "cpu"
     if configuration["backend"] == "cuda" and not info["cuda_available"]:
         raise HTTPException(409, "CUDA backend is unavailable on this system.")
     try:
@@ -707,7 +852,6 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         if int(job["analysis"].get("variables", 0)) >= 50_000:
             command.append("--sparse-primal")
     execution_limit = int(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
-    started = time.perf_counter()
     process: subprocess.Popen[str] | None = None
     try:
         with JOB_LOCK:
@@ -728,6 +872,8 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         total_ms = (time.perf_counter() - started) * 1000
         raw_output = (stdout or "") + (("\nSTDERR:\n" + stderr) if stderr else "")
         result = parse_solver_output(raw_output, total_ms)
+        result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
+        _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
         if process.returncode != 0 and result["status"] == "FAILED":
             detail = next((line.strip() for line in reversed((stderr or "").splitlines()) if line.strip()), "")
             if "bad allocation" in detail.lower() or "out of memory" in detail.lower():
@@ -742,6 +888,8 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         total_ms = (time.perf_counter() - started) * 1000
         text = (stdout or exc.stdout or "") if isinstance(stdout or exc.stdout, str) else ""
         result = parse_solver_output(text, total_ms)
+        result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
+        _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
         result["status"] = "TIME_LIMIT"
         result["metrics"]["message"] = f"The solver reached the configured {execution_limit}-second time limit."
     finally:
@@ -777,10 +925,14 @@ def solve(request: SolveRequest) -> dict[str, Any]:
     job = JOBS.get(request.job_id)
     if not job:
         raise HTTPException(404, "Unknown or expired job ID. Analyze a model first.")
+    request_started = time.perf_counter()
     configuration = request.model_dump()
     configuration["execution_time_limit_seconds"] = configuration["time_limit_seconds"]
     result = _run_solver(request.job_id, job, configuration)
-    return _complete_result(request.job_id, job, configuration, result, {"mode": "expert", "attempts": [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"]}]})
+    completed = _complete_result(request.job_id, job, configuration, result, {"mode": "expert", "attempts": [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"]}]})
+    _publish_timing_contract(completed, float(job.get("preparation_time_ms", 0.0)) + (time.perf_counter() - request_started) * 1000)
+    job["result"] = completed
+    return completed
 
 
 @app.get("/api/policy/{job_id}")
@@ -796,6 +948,7 @@ def solve_automatically(request: AutoSolveRequest) -> dict[str, Any]:
     job = JOBS.get(request.job_id)
     if not job:
         raise HTTPException(404, "Unknown or expired job ID. Analyze a model first.")
+    request_started = time.perf_counter()
     selection = SolverPolicy.select(job["analysis"], device_info())
     configuration = {"job_id": request.job_id, **selection.payload()}
     configuration.pop("fallback_methods")
@@ -804,12 +957,16 @@ def solve_automatically(request: AutoSolveRequest) -> dict[str, Any]:
     attempts = [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"], "reason": "Initial automatic selection"}]
     if selection.fallback_methods and SolverPolicy.can_fallback(result["status"], result["verification"]):
         fallback_method = selection.fallback_methods[0]
-        fallback_configuration = {**configuration, "method": fallback_method}
+        fallback_backend = "cuda" if fallback_method in {"pdhg", "ipm", "qp"} and device_info().get("cuda_available") else "cpu"
+        fallback_configuration = {**configuration, "method": fallback_method, "backend": fallback_backend}
         fallback = _run_solver(request.job_id, job, fallback_configuration)
         attempts.append({"method": fallback_method, "backend": fallback_configuration["backend"], "status": fallback["status"], "verification": fallback["verification"], "reason": f"Fallback after {result['status']} / verification {result['verification']}"})
         result, configuration = fallback, fallback_configuration
     automation = {"mode": "automatic", "selection": selection.payload(), "attempts": attempts, "final_method": configuration["method"], "final_backend": configuration["backend"]}
-    return _complete_result(request.job_id, job, configuration, result, automation)
+    completed = _complete_result(request.job_id, job, configuration, result, automation)
+    _publish_timing_contract(completed, float(job.get("preparation_time_ms", 0.0)) + (time.perf_counter() - request_started) * 1000)
+    job["result"] = completed
+    return completed
 
 
 @app.post("/api/solve/{job_id}/cancel")
@@ -879,26 +1036,172 @@ def export_result(job_id: str, format: str = "csv") -> Response:
 @app.get("/api/benchmarks")
 def benchmarks() -> dict[str, Any]:
     datasets: list[dict[str, Any]] = []
-    for directory in sorted((ROOT / "results").glob("*")):
+    for suite_name in ("netlib", "mittelmann", "miplib", "qplib"):
+        directory = ROOT / "results" / suite_name
         report = directory / f"{directory.name}_benchmark.json"
         if not report.is_file():
+            datasets.append({"dataset": suite_name, "metadata": {}, "instances": []})
             continue
         try:
             data = json.loads(report.read_text(encoding="utf-8"))
             instances = data.get("instances", [])
+            external_path = directory / "external_solver_comparison.json"
+            external = {}
+            if external_path.is_file():
+                try:
+                    external = {Path(row.get("instance") or "").name.lower(): row
+                                for row in json.loads(external_path.read_text(encoding="utf-8"))
+                                if row.get("instance")}
+                except (OSError, json.JSONDecodeError, TypeError):
+                    external = {}
             datasets.append({
                 "dataset": directory.name,
                 "metadata": data.get("metadata", {}),
                 "instances": [{
                     "instance": row.get("instance"), "status": row.get("status"),
-                    "objective": row.get("objective"), "verification_pass": row.get("verification_pass"),
+                    "objective": row.get("objective_value", row.get("objective")), "verification_pass": row.get("verification_pass"),
                     "iterations": row.get("iterations"), "nodes_processed": row.get("nodes_processed"),
                     "solve_time_ms": row.get("solve_time_ms"), "failure_reason": row.get("failure_reason"),
+                    "timing": row.get("timing") or {
+                        "parsing_ms": row.get("parse_time_ms"), "presolve_ms": row.get("presolve_time_ms"),
+                        "solver_ms": row.get("solve_time_ms"), "postsolve_ms": row.get("postsolve_time_ms"),
+                        "verification_ms": row.get("verification_time_ms"), "backend_total_ms": row.get("total_time_ms"),
+                    },
+                    "problem_type": row.get("problem_class"), "variables": row.get("number_of_variables"),
+                    "constraints": row.get("number_of_constraints"), "nonzeros": row.get("number_of_nonzeros"),
+                    "sparsity": ((1.0 - row.get("number_of_nonzeros") / (row.get("number_of_variables") * row.get("number_of_constraints"))) * 100
+                                 if row.get("number_of_nonzeros") is not None and row.get("number_of_variables") and row.get("number_of_constraints") else None),
+                    "algorithm": row.get("solver_method"),
+                    "backend": row.get("backend"), "best_bound": row.get("best_dual_bound"),
+                    "relative_gap": row.get("relative_gap"), "parse_time_ms": row.get("parse_time_ms"),
+                    "presolve_time_ms": row.get("presolve_time_ms"), "postsolve_time_ms": row.get("postsolve_time_ms"),
+                    "verification_time_ms": row.get("verification_time_ms"), "total_time_ms": row.get("total_time_ms"),
+                    "primal_residual": row.get("primal_residual"), "dual_residual": row.get("dual_residual"),
+                    "complementarity_residual": row.get("complementarity_residual"), "convexity": row.get("convexity"),
+                    "hessian_type": row.get("hessian_type"), "nodes_created": row.get("nodes_created"),
+                    "cuts_generated": row.get("cuts_generated"), "feasibility_pump_used": row.get("feasibility_pump_used"),
+                    "highs": external.get(Path(row.get("instance") or "").name.lower()),
                 } for row in instances],
             })
         except (OSError, json.JSONDecodeError):
-            continue
-    return {"datasets": datasets}
+            datasets.append({"dataset": suite_name, "metadata": {}, "instances": [], "error": "Benchmark report could not be read."})
+    return {"datasets": datasets, "comparators": comparator_availability()}
+
+
+@app.delete("/api/benchmarks/{dataset}")
+def delete_benchmark_records(dataset: str) -> dict[str, Any]:
+    """Delete generated result reports for one known suite, never source models."""
+    suite = dataset.lower()
+    if suite not in {"netlib", "mittelmann", "miplib", "qplib"}:
+        raise HTTPException(404, "Unknown benchmark suite.")
+    directory = ROOT / "results" / suite
+    report_names = (
+        f"{suite}_benchmark.json", "lp_benchmark.csv", "lp_benchmark.json",
+        "milp_benchmark.csv", "milp_benchmark.json", "qp_benchmark.csv", "qp_benchmark.json",
+        "external_solver_comparison.csv", "external_solver_comparison.json",
+        "cpu_gpu_benchmark.csv", "cpu_gpu_benchmark.json",
+        "presolve_benchmark.csv", "presolve_benchmark.json",
+        "numerical_robustness.csv", "numerical_robustness.json", "benchmark_summary.md",
+    )
+    deleted = []
+    for name in report_names:
+        path = directory / name
+        if path.is_file() and path.parent == directory:
+            path.unlink()
+            deleted.append(name)
+    return {"dataset": suite, "deleted_files": deleted, "deleted_count": len(deleted)}
+
+
+@app.post("/api/benchmarks/compare")
+async def compare_benchmark_model(
+    file: UploadFile = File(...),
+    time_limit_seconds: int = Form(default=60, ge=1, le=3600),
+) -> dict[str, Any]:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(415, "Supported benchmark formats are MPS, JSON, TXT, and QPLIB.")
+    payload = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    job_id = uuid.uuid4().hex
+    directory = Path(tempfile.mkdtemp(prefix=f"sovereign-compare-{job_id[:8]}-"))
+    source = directory / _safe_name(file.filename or f"benchmark{suffix}")
+    source.write_bytes(payload)
+    try:
+        preparation_started = time.perf_counter()
+        solver_path, analysis = _prepare_model(source, directory)
+        preparation_time_ms = (time.perf_counter() - preparation_started) * 1000
+        model = parse_problem_file(str(solver_path))
+        selection = SolverPolicy.select(analysis, device_info())
+        configuration = {"job_id": job_id, **selection.payload()}
+        configuration.pop("fallback_methods", None)
+        configuration["execution_time_limit_seconds"] = time_limit_seconds
+        configuration["time_limit_seconds"] = time_limit_seconds
+        job = {"directory": directory, "path": solver_path, "source_path": source,
+               "analysis": analysis, "preparation_time_ms": preparation_time_ms, "state": "analyzed"}
+        JOBS[job_id] = job
+        solve_started = time.perf_counter()
+        sovereign_result = _run_solver(job_id, job, configuration)
+        _publish_timing_contract(sovereign_result, preparation_time_ms + (time.perf_counter() - solve_started) * 1000)
+        sovereign = {
+            "solver": "sovereign", "status": sovereign_result.get("status", "FAILED"),
+            "objective": (sovereign_result.get("metrics") or {}).get("objective"),
+            "solve_time_ms": (sovereign_result.get("timings") or {}).get("solver_time_ms"),
+            "timing": sovereign_result.get("timing"),
+            "iterations": (sovereign_result.get("metrics") or {}).get("iterations"),
+            "nodes": (sovereign_result.get("metrics") or {}).get("nodes_processed"),
+            "best_bound": (sovereign_result.get("metrics") or {}).get("dual_bound"),
+            "relative_gap": (sovereign_result.get("metrics") or {}).get("relative_gap"),
+            "verification": sovereign_result.get("verification", "N/A"),
+            "backend": configuration.get("backend"), "algorithm": configuration.get("method"),
+            "convexity": (sovereign_result.get("metrics") or {}).get("convexity"),
+            "primal_residual": (sovereign_result.get("metrics") or {}).get("primal_residual"),
+            "dual_residual": (sovereign_result.get("metrics") or {}).get("dual_residual"),
+            "complementarity_residual": (sovereign_result.get("metrics") or {}).get("complementarity_residual"),
+            "failure_reason": (sovereign_result.get("metrics") or {}).get("message"),
+        }
+        references = [solve_comparator(name, model, float(time_limit_seconds)) for name in ("highs", "gurobi", "cplex")]
+        solvers = [sovereign, *references]
+        objective_tolerance = 1e-6
+        available_objectives = [row for row in solvers if row.get("verification") == "PASS" and isinstance(row.get("objective"), (int, float))]
+        agreement = None
+        comparisons = []
+        if len(available_objectives) > 1:
+            base = sovereign.get("objective")
+            for reference in available_objectives:
+                if reference["solver"] == "sovereign" or not isinstance(base, (int, float)):
+                    continue
+                difference = abs(float(base) - float(reference["objective"]))
+                relative = difference / max(1.0, abs(float(base)), abs(float(reference["objective"])))
+                matches = difference <= objective_tolerance or relative <= objective_tolerance
+                comparisons.append({"solver": reference["solver"], "absolute_difference": difference,
+                                    "relative_difference": relative, "agree": matches})
+            agreement = all(item["agree"] for item in comparisons) if comparisons else None
+        env = device_info()
+        try:
+            from sovereign_solver.benchmark import _total_memory_bytes
+            ram_bytes = _total_memory_bytes()
+        except Exception:
+            ram_bytes = None
+        return {
+            "instance": source.name, "problem_type": analysis.get("problem_type"),
+            "model": {key: analysis.get(key) for key in ("variables", "constraints", "nonzeros", "sparsity", "objective_sense")},
+            "time_limit_seconds": time_limit_seconds, "hardware": {
+                "cpu": platform.processor() or None, "gpu": env.get("gpu_name"),
+                "cuda_available": env.get("cuda_available"), "cuda_version": env.get("cuda_runtime"),
+                "ram_bytes": ram_bytes, "os": platform.platform(),
+            },
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "fairness": "Same input model, same machine, same wall-clock time limit; solver settings and algorithms remain solver-specific.",
+            "solver_results": solvers, "objective_agreement": agreement,
+            "objective_comparisons": comparisons,
+        }
+    except (ValueError, OSError, UnicodeError) as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(422, f"Benchmark model could not be prepared: {exc}") from exc
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+        JOBS.pop(job_id, None)
 
 
 @app.get("/")

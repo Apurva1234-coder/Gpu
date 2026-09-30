@@ -17,6 +17,8 @@ struct QPResult {
   QPStatus status{QPStatus::NumericalFailure};
   std::vector<double> x;
   double objectiveValue=0,primalResidual=0,dualResidual=0,complementarity=0;
+  double solverTimeMs=0,postsolveTimeMs=0,verificationTimeMs=0;
+  bool solverInvoked=false;
   std::size_t iterations=0;
   std::string message;
 };

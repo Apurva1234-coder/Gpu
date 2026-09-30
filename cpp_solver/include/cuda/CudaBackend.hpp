@@ -29,6 +29,11 @@ public:
   void gemvTranspose(const double* A, std::size_t rows, std::size_t cols, const double* x, double* y) const;
   void spmv(const nla::CSRMatrix& A, const double* x, double* y, double alpha=1.0, double beta=0.0) const;
   bool solveDense(const nla::DenseMatrix& A, const std::vector<double>& b, std::vector<double>& x) const;
+  bool solvePdhg(const nla::CSRMatrix& A, const std::vector<double>& b,
+      const std::vector<double>& c, const std::vector<double>& tau,
+      const std::vector<double>& sigma, std::size_t maxIterations, double tolerance,
+      std::vector<double>& x, std::vector<double>& y, std::size_t& iterations,
+      double& primalResidual, double& dualResidual, double& complementarity) const;
 private:
   static Context* default_;
   bool available_=false;

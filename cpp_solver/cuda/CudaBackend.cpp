@@ -12,4 +12,5 @@ void Context::gemv(const double*,std::size_t,std::size_t,const double*,double*)c
 void Context::gemvTranspose(const double*,std::size_t,std::size_t,const double*,double*)const{throw std::runtime_error("CUDA backend not compiled");}
 void Context::spmv(const nla::CSRMatrix&,const double*,double*,double,double)const{throw std::runtime_error("CUDA backend not compiled");}
 bool Context::solveDense(const nla::DenseMatrix&,const std::vector<double>&,std::vector<double>&)const{throw std::runtime_error("CUDA backend not compiled");}
+bool Context::solvePdhg(const nla::CSRMatrix&,const std::vector<double>&,const std::vector<double>&,const std::vector<double>&,const std::vector<double>&,std::size_t,double,std::vector<double>&,std::vector<double>&,std::size_t&,double&,double&,double&)const{return false;}
 }

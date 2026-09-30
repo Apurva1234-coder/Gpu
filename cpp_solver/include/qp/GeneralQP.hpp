@@ -1,5 +1,7 @@
 #pragma once
 #include "qp/QPIPM.hpp"
+#include "cuda/CudaBackend.hpp"
+#include <chrono>
 
 namespace sovereign {
 class GeneralQPInteriorPoint {
@@ -113,12 +115,17 @@ class GeneralQPInteriorPoint {
     }
 
     t.rebuildMappings();
+    const auto solverStart=std::chrono::steady_clock::now();
     auto r=QPInteriorPoint{tol_}.solve(t,limit);
+    if(auto* context=cuda::Context::defaultContext()) context->synchronize();
+    r.solverInvoked=true;
+    r.solverTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-solverStart).count();
     if(r.x.size()<n){
       r.status=QPStatus::NumericalFailure;
       r.message="standard-form solution has wrong dimension";
       return r;
     }
+    const auto postsolveStart=std::chrono::steady_clock::now();
     std::vector<double> original(n);
     for(std::size_t i=0;i<n;++i) original[i]=offset[i]+sign[i]*scale[i]*r.x[i];
     r.x=original;
@@ -128,6 +135,8 @@ class GeneralQPInteriorPoint {
       const double c=m.objective.count(i)?m.objective.at(i):0.0;
       r.objectiveValue+=.5*q*r.x[i]*r.x[i]+c*r.x[i];
     }
+    r.postsolveTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-postsolveStart).count();
+    const auto verificationStart=std::chrono::steady_clock::now();
     r.primalResidual=0;
     for(const auto& c:m.constraints){
       double lhs=0,normalizer=std::max(1.0,std::abs(c.rhs));
@@ -144,6 +153,7 @@ class GeneralQPInteriorPoint {
         r.primalResidual=std::max(r.primalResidual,upperViolation/std::max(1.0,std::abs(m.variables[i].upper)));
       }
     }
+    r.verificationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-verificationStart).count();
     return r;
   }
  private:

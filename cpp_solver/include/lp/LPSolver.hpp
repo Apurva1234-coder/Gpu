@@ -16,8 +16,8 @@
 
 namespace sovereign {
 
-enum class LPMethod { RevisedSimplex, DualSimplex, IPM };
-inline const char* methodName(LPMethod m) { return m==LPMethod::RevisedSimplex?"revised-simplex":m==LPMethod::DualSimplex?"dual-simplex":"ipm"; }
+enum class LPMethod { RevisedSimplex, DualSimplex, IPM, PDHG };
+inline const char* methodName(LPMethod m) { return m==LPMethod::RevisedSimplex?"revised-simplex":m==LPMethod::DualSimplex?"dual-simplex":m==LPMethod::IPM?"ipm":"pdhg"; }
 
 // Internal form: maximize q*x, A*x <= b, x >= 0.  The tableau-free
 // implementation below is the standard two-phase revised-simplex recurrence;

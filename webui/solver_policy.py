@@ -41,13 +41,14 @@ class SolverSelection:
 class SolverPolicy:
     """Choose implemented solver paths and bounded resources from model complexity.
 
-    Revised/Dual simplex and MILP branch-and-bound are CPU paths in this project.
-    Convex QP can use CUDA after algorithm support and device availability are
-    confirmed. Other automatic paths remain on CPU.
+    LP routing branches on matrix sparsity: sparse LPs use PDHG and CUDA when
+    available; less sparse LPs use Revised Simplex on CPU.
+    Revised/Dual simplex and MILP branch-and-bound remain CPU paths.
     """
 
-    # Time remains unlimited by explicit project policy. MILP has a separate
-    # branch-and-bound node budget because LP iterations and search nodes differ.
+    # Automatic solve time remains unlimited. LP iteration budgets are also
+    # disabled below so LP methods run to solver termination. QP and MILP keep
+    # their separate conservative diagnostic/search budgets.
     SIZE_LIMITS = (
         ("SMALL", 10_000, ExecutionLimits("SMALL", 10_000, 0, 10_000)),
         ("MEDIUM", 100_000, ExecutionLimits("MEDIUM", 25_000, 0, 100_000)),
@@ -90,6 +91,7 @@ class SolverPolicy:
         sparse = float(analysis.get("sparsity", 0)) >= 90
         structure = "large sparse constraint matrix" if limits.name == "LARGE" and sparse else "model dimensions and nonzero structure"
         size = f"{variables} variables, {constraints} constraints, and {nonzeros} nonzeros"
+        backend = "cpu"
 
         if problem_type == "QP":
             method = "qp"
@@ -114,22 +116,31 @@ class SolverPolicy:
             backend_reason = "MILP branch-and-bound control and its verified automatic path run on CPU."
             fallbacks = ()
         else:
-            method = "revised-simplex"
-            reason = f"Continuous LP is routed to Revised Simplex, the broadest validated automatic LP path. Its {structure} selected the {limits.name.lower()} execution policy ({size})."
-            backend_reason = "Revised Simplex is currently CPU-optimized. CUDA acceleration is reserved for supported numerical kernels."
-            fallbacks = ("dual-simplex",)
+            # Choose the LP execution branch from sparsity alone, independent
+            # of model-size tier. PDHG is the implemented sparse LP path.
+            pdhg_eligible = sparse
+            method = "pdhg" if pdhg_eligible else "revised-simplex"
+            reason = (f"LP matrix sparsity is {analysis.get('sparsity', 0)}%, at or above the 90% sparse threshold, so the model is routed to PDHG ({size})." if pdhg_eligible else
+                      f"LP matrix sparsity is {analysis.get('sparsity', 0)}%, below the 90% threshold, so the model is routed to CPU Revised Simplex ({size}).")
+            reason += " Automatic LP solving has no iteration or time limit (0 = unlimited)."
+            cuda_eligible = pdhg_eligible and bool(device.get("cuda_available"))
+            backend = "cuda" if cuda_eligible else "cpu"
+            backend_reason = ("CUDA PDHG keeps the sparse matrix resident on the device during iterations." if cuda_eligible else
+                              "PDHG will run on CPU because CUDA is unavailable." if pdhg_eligible else
+                              "Revised Simplex is the selected CPU path because the LP matrix is below the sparse threshold.")
+            fallbacks = ("revised-simplex",) if pdhg_eligible else ("dual-simplex",)
 
         if not device.get("cuda_available"):
             cuda_note = " CUDA is unavailable on this machine."
-        elif problem_type == "QP" and backend == "cuda":
-            cuda_note = " CUDA was detected and selected for the QP Newton solve."
+        elif backend == "cuda":
+            cuda_note = f" CUDA was detected and selected for the {method.upper()} solve."
         else:
             cuda_note = " CUDA was detected, but this selected solver path is CPU-only."
         return SolverSelection(
             method=method,
-            backend=backend if problem_type == "QP" else "cpu",
+            backend=backend if problem_type in {"QP", "LP"} else "cpu",
             presolve=True,
-            max_iterations=qp_iterations if problem_type == "QP" else limits.max_iterations,
+            max_iterations=0 if problem_type == "LP" else qp_iterations if problem_type == "QP" else limits.max_iterations,
             time_limit_seconds=limits.time_limit_seconds,
             model_size=limits.name,
             complexity_score=score,

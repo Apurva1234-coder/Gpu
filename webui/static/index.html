@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=timing-telemetry-20260930" />
     <link rel="stylesheet" href="/loading.css" />
   <link rel="stylesheet" href="/matrix.css" />
     <style>
@@ -57,6 +57,11 @@
       <section id="solve" class="section-shell solve-section">
         <div class="section-heading"><div><p class="eyebrow">SOLVE WORKSPACE</p><h2>Bring a model into focus.</h2></div><p>Analyze a supported model, select the real execution path, and inspect independently verified output.</p></div>
         <div class="example-row"><span>QUICK START</span><button data-example="lp">Try LP example</button><button data-example="qp">Try QP example</button><button data-example="milp">Try MILP example</button><button data-example="netlib-emps">Try Netlib EMPS</button></div>
+        <section class="builtin-demos panel" aria-labelledby="builtinDemosTitle">
+          <div class="demo-heading"><div><p class="eyebrow">REAL MODELS · SAME SOLVER PIPELINE</p><h3 id="builtinDemosTitle">Built-in Demo Datasets</h3><p>Each model is read from the project and analyzed by the same parser as an upload.</p></div></div>
+          <div id="demoTypeTabs" class="demo-type-tabs" role="tablist" aria-label="Demo dataset problem type"></div>
+          <div id="demoDatasetCards" class="demo-dataset-grid" aria-live="polite"><div class="demo-empty">Loading datasets from the server…</div></div>
+        </section>
         <div id="dropZone" class="upload-zone" tabindex="0"><input id="fileInput" type="file" accept=".mps,.json,.txt,.qplib" />
           <div class="upload-glyph">⇪</div><h3>Drop an optimization model here</h3><p>or <button id="browseButton" class="link-button">browse files</button> · MPS, JSON, TXT, QPLIB · up to 128 MB</p><span class="upload-note">QPLIB uploads are parsed locally into the solver model. Netlib EMPS/FMPS input is expanded locally before the C++ solver runs.</span>
         </div>
@@ -64,7 +69,7 @@
       </section>
 
       <section id="benchmarks" class="section-shell benchmark-section">
-        <div class="section-heading"><div><p class="eyebrow">MEASURED BENCHMARKS</p><h2>Evidence, not claims.</h2></div><p>Local benchmark reports are shown as recorded, including timeouts, unsupported cases, and verification results.</p></div>
+        <div class="section-heading"><div><p class="eyebrow">MEASURED BENCHMARKS</p><h2>Evidence, not claims.</h2></div><p>Same problems. Same machine. Measured results. Compare the same uploaded model across Sovereign and locally available solver engines.</p></div>
         <div id="benchmarkArea" class="panel loading-panel">Loading local benchmark reports…</div>
       </section>
 
@@ -75,6 +80,6 @@
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=timing-telemetry-20260930"></script>
   </body>
 </html>
