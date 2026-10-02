@@ -38,6 +38,8 @@ CSV_FIELDS = [
     "standardized_rows", "standardized_columns", "standardized_nonzeros", "postsolve_time_ms",
     "presolve_pass_stats", "presolve_termination_reason", "presolve_time_budget_ms",
     "estimated_dense_memory_bytes", "dense_memory_budget_bytes", "dense_memory_guard_triggered",
+    "sparse_pricing_ms", "sparse_basis_solve_ms", "sparse_devex_ms", "sparse_factorization_ms",
+    "sparse_ratio_test_ms", "sparse_lexicographic_ms", "sparse_refactorizations", "sparse_pivots", "sparse_lexicographic_solves", "sparse_bland_fallback_triggered",
     "verification_time_ms", "total_time_ms", "primal_residual", "dual_residual",
     "complementarity_residual", "integer_feasible", "verification_pass",
     "convexity", "hessian_type", "gpu_available", "gpu_device", "gpu_used",
@@ -247,6 +249,16 @@ def _parse_solver_output(output: str, returncode: int) -> dict[str, Any]:
         "estimated_dense_memory_bytes": _first_number(_field(output, "Estimated dense memory bytes")),
         "dense_memory_budget_bytes": _nonnegative_int(_field(output, "Dense memory budget bytes")),
         "dense_memory_guard_triggered": (_field(output, "Dense memory guard") or "").upper() == "TRIGGERED",
+        "sparse_pricing_ms": _first_number(_field(output, "Sparse pricing time ms")),
+        "sparse_basis_solve_ms": _first_number(_field(output, "Sparse basis solve time ms")),
+        "sparse_devex_ms": _first_number(_field(output, "Sparse Devex time ms")),
+        "sparse_factorization_ms": _first_number(_field(output, "Sparse factorization time ms")),
+        "sparse_ratio_test_ms": _first_number(_field(output, "Sparse ratio test time ms")),
+        "sparse_lexicographic_ms": _first_number(_field(output, "Sparse lexicographic time ms")),
+        "sparse_refactorizations": _nonnegative_int(_field(output, "Sparse refactorizations")),
+        "sparse_pivots": _nonnegative_int(_field(output, "Sparse pivots")),
+        "sparse_lexicographic_solves": _nonnegative_int(_field(output, "Sparse lexicographic solves")),
+        "sparse_bland_fallback_triggered": (_field(output, "Sparse Bland fallback") or "").upper() == "YES",
         "primal": _vector(output),
         "primal_names": _names(output),
         "primal_residual_reported": _first_number(_field(output, "Primal residual"), _field(output, "Feasibility")),
@@ -320,6 +332,16 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
                            "estimated_dense_memory_bytes": _first_number(_field(output, "Estimated dense memory bytes")),
                            "dense_memory_budget_bytes": _nonnegative_int(_field(output, "Dense memory budget bytes")),
                            "dense_memory_guard_triggered": (_field(output, "Dense memory guard") or "").upper() == "TRIGGERED",
+                           "sparse_pricing_ms": _first_number(_field(output, "Sparse pricing time ms")),
+                           "sparse_basis_solve_ms": _first_number(_field(output, "Sparse basis solve time ms")),
+                           "sparse_devex_ms": _first_number(_field(output, "Sparse Devex time ms")),
+                           "sparse_factorization_ms": _first_number(_field(output, "Sparse factorization time ms")),
+                           "sparse_ratio_test_ms": _first_number(_field(output, "Sparse ratio test time ms")),
+                           "sparse_lexicographic_ms": _first_number(_field(output, "Sparse lexicographic time ms")),
+                           "sparse_refactorizations": _nonnegative_int(_field(output, "Sparse refactorizations")),
+                           "sparse_pivots": _nonnegative_int(_field(output, "Sparse pivots")),
+                           "sparse_lexicographic_solves": _nonnegative_int(_field(output, "Sparse lexicographic solves")),
+                           "sparse_bland_fallback_triggered": (_field(output, "Sparse Bland fallback") or "").upper() == "YES",
                            "postsolve_time_ms": _first_number(_field(output, "Postsolve time ms")),
                            "cli_verification_time_ms": _first_number(_field(output, "Verification time ms")), "cli_time_ms": elapsed,
                            "build_compiler": _field(output, "Build compiler"),
@@ -571,7 +593,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             objective = check["objective"] if check["objective"] is not None else result.get("objective_value")
             failure_reason = row.get("failure_reason") or _verification_failure_reason(
                 result, check, candidate_status, objective_consistent)
-            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "solve_pipeline_time_ms", "standardization_time_ms", "standardized_rows", "standardized_columns", "standardized_nonzeros", "presolve_pass_stats", "presolve_termination_reason", "presolve_time_budget_ms", "estimated_dense_memory_bytes", "dense_memory_budget_bytes", "dense_memory_guard_triggered", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
+            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "solve_pipeline_time_ms", "standardization_time_ms", "standardized_rows", "standardized_columns", "standardized_nonzeros", "presolve_pass_stats", "presolve_termination_reason", "presolve_time_budget_ms", "estimated_dense_memory_bytes", "dense_memory_budget_bytes", "dense_memory_guard_triggered", "sparse_pricing_ms", "sparse_basis_solve_ms", "sparse_devex_ms", "sparse_factorization_ms", "sparse_ratio_test_ms", "sparse_lexicographic_ms", "sparse_refactorizations", "sparse_pivots", "sparse_lexicographic_solves", "sparse_bland_fallback_triggered", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
             row["presolve_fallback"] = result.get("presolve_fallback", False)
             row["presolve_applied_to_solve"] = (
                 classification == "LP" and not args.no_presolve and not row["presolve_fallback"]

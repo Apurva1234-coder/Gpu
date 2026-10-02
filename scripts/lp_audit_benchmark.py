@@ -23,6 +23,12 @@ TIMING_FIELDS = {
     "standardization_ms": "Standardization time ms",
     "solve_ms": "Solve time ms",
     "solve_pipeline_ms": "Solve pipeline time ms",
+    "sparse_pricing_ms": "Sparse pricing time ms",
+    "sparse_basis_solve_ms": "Sparse basis solve time ms",
+    "sparse_devex_ms": "Sparse Devex time ms",
+    "sparse_factorization_ms": "Sparse factorization time ms",
+    "sparse_ratio_test_ms": "Sparse ratio test time ms",
+    "sparse_lexicographic_ms": "Sparse lexicographic time ms",
     "postsolve_ms": "Postsolve time ms",
     "verification_ms": "Verification time ms",
 }
@@ -39,6 +45,9 @@ INTEGER_FIELDS = {
     "iterations": "Iterations",
     "attempt_count": "Attempt count",
     "dense_memory_budget_bytes": "Dense memory budget bytes",
+    "sparse_refactorizations": "Sparse refactorizations",
+    "sparse_pivots": "Sparse pivots",
+    "sparse_lexicographic_solves": "Sparse lexicographic solves",
 }
 FLOAT_FIELDS = {
     "estimated_dense_memory_bytes": "Estimated dense memory bytes",
@@ -47,6 +56,7 @@ TEXT_FIELDS = {
     "presolve_termination": "Presolve termination",
     "fallback_reason": "Fallback reason",
     "dense_memory_guard": "Dense memory guard",
+    "sparse_bland_fallback": "Sparse Bland fallback",
 }
 
 

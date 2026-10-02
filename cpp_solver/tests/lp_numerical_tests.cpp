@@ -57,6 +57,8 @@ int main(){
         auto r=LPSolver{}.solve(m);
         assert(r.status==LPStatus::Optimal); assert(r.solution.primal.size()==count);
         assert(close(r.solution.primal[0],1)); assert(close(r.objectiveValue,static_cast<double>(count)));
+        assert(r.sparsePivots>0); assert(r.sparseRefactorizations>0);
+        assert(r.sparsePricingTimeMs>=0); assert(r.sparseFactorizationTimeMs>=0);
     }
     return 0;
 }

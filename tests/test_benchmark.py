@@ -33,6 +33,16 @@ Presolve fallback: YES
 Estimated dense memory bytes: 512000000
 Dense memory budget bytes: 268435456
 Dense memory guard: TRIGGERED
+Sparse pricing time ms: 1.25
+Sparse basis solve time ms: 2.5
+Sparse Devex time ms: 3.75
+Sparse factorization time ms: 5
+Sparse ratio test time ms: 6.25
+Sparse lexicographic time ms: 0.75
+Sparse refactorizations: 4
+Sparse pivots: 19
+Sparse lexicographic solves: 7
+Sparse Bland fallback: YES
 Problem Type: LP
 Status: OPTIMAL
 Iterations: 2
@@ -227,6 +237,16 @@ ENDATA
         self.assertEqual(result["estimated_dense_memory_bytes"], 512000000.0)
         self.assertEqual(result["dense_memory_budget_bytes"], 268435456)
         self.assertTrue(result["dense_memory_guard_triggered"])
+
+    def test_sparse_simplex_profile_is_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["sparse_pricing_ms"], 1.25)
+        self.assertEqual(result["sparse_factorization_ms"], 5.0)
+        self.assertEqual(result["sparse_lexicographic_ms"], 0.75)
+        self.assertEqual(result["sparse_refactorizations"], 4)
+        self.assertEqual(result["sparse_pivots"], 19)
+        self.assertEqual(result["sparse_lexicographic_solves"], 7)
+        self.assertTrue(result["sparse_bland_fallback_triggered"])
 
     def test_original_model_verification_bounds_integrality_and_objective(self):
         model = parse_problem_file(str(ROOT / "examples" / "milp_relaxation.json"))

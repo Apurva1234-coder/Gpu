@@ -105,3 +105,20 @@ An MSVC x64 Release executable was used for three runs each on AFIRO, Bandm, Sca
 PDHG was faster on Bandm and Scagr25 in this bounded diagnostic, but did not produce a verified solution on any of the four instances; it was slower on Pilot and AFIRO. Dual Simplex was substantially slower on AFIRO and Bandm, timed out on Scagr25, and was correctly refused for Pilot. These results do not support a broad PDHG or Dual Simplex default. The pilot Auto policy therefore retains Revised Simplex for ordinary small/medium structures and routes only very large sparse LPs (at least 100,000 columns, 10,000 rows, 1,000,000 entries, and 99.5% sparsity) to sparse PDHG as the scale-oriented algorithm. It disables a second full-solve fallback on that route. That threshold is a transparent routing policy, not an empirically established speed crossover; status and original-model verification remain authoritative. CPU is retained because no paired, verified CPU/CUDA crossover has been established.
 
 No million-scale input is present in the checked-in benchmark corpus. Phase 5 validates the dispatch decision with synthetic analysis metadata only; it does not claim million-scale parse, memory, convergence, or solve performance.
+
+## Phase 6 sparse Revised Simplex profile and experiment
+
+The sparse Revised Simplex path now reports pricing, basis solves, Devex updates, factorization/refactor counts, ratio-test time, lexicographic anti-cycling work, and pivots. Timing labels are internal stage measurements; lexicographic time is a subset of ratio-test work and must not be added to it. The first profile is `lp_audit_phase6_profile.json`; it used a MinGW GCC `-O2 -DNDEBUG` build, the same machine and inputs for three repetitions, presolve on, 2,000 iterations, and an 8-second process timeout. The final experiment is `lp_audit_phase6_adaptive_ties8k.json` under the same procedure.
+
+| Model | Profile solve ms / status | Profile hotspot | Adaptive-tie solve ms / status | Iterations, profile → adaptive |
+|---|---:|---|---:|---:|
+| AFIRO | below timer resolution / OPTIMAL, PASS | Dense path | below timer resolution / OPTIMAL, PASS | 16 → 16 |
+| Bandm | 228.0 / NUMERICAL_FAILURE, verification FAIL | Dense path | 214.0 / NUMERICAL_FAILURE, verification FAIL | 926 → 838 |
+| Scagr25 | 794.0 / NUMERICAL_FAILURE, verification FAIL | Factorization 414.2 ms; 75 refactors; 710 lexicographic solves | 748.2 / NUMERICAL_FAILURE, verification FAIL | 1,093 → 1,106 |
+| Pilot | 1,438.4 / NUMERICAL_FAILURE, no candidate | Lexicographic tie solves 442.3 ms (3,632 solves); factorization 461.9 ms | 430.8 / NUMERICAL_FAILURE, no candidate | 585 → 315 |
+
+The sparse Phase I ratio test now estimates tie work as `tie count × basis dimension`. When this exceeds an 8,192 row-work budget, it uses a stable row tie-break and tracks basis hashes; if a basis repeats, the remaining Phase I pivots switch to Bland entering/leaving order. Smaller tie sets retain the original exact lexicographic rule. On Pilot the lexicographic work fell to 5.3 ms and 84 solves. On Scagr25 it remained 21.5 ms and 624 solves. The sparse LU detail is now appended to, rather than overwritten by, the dense-memory routing explanation; Pilot reports a failed pivot at basis position 1,497 with magnitude 0.000000.
+
+These are time-to-failure changes: Bandm, Scagr25, and Pilot still fail and produce no verified optimum. Do not describe them as solved-model speedups. The experiment proves the expensive Pilot lexicographic work was a material part of the diagnostic path, but its early sparse-LU pivot failure remains the blocking correctness issue.
+
+Rejected experiments were also measured: always using Bland’s rule raised Scagr25 from 794 ms to 2,361 ms and Pilot from 1,438 ms to 2,965 ms, with both still failing; changing the fixed refactor interval from 15 to 30 caused Pilot to fail after 60 pivots and did not establish a safe general improvement. Both settings were discarded. Pricing and factorization improvements still need to preserve verified solutions, and Devex pricing/factorization remain open work.

@@ -223,7 +223,9 @@ public:
             if(!denseLPWithinMemoryBudget(m)) {
                 LPResult sparse=solveSparse(m,method,limit);
                 sparse.denseMemoryGuardTriggered=true;
+                const std::string solverMessage=sparse.message;
                 sparse.message=denseLPMemoryGuardMessage(m)+"; sparse revised simplex selected";
+                if(!solverMessage.empty()) sparse.message+="; solver detail: "+solverMessage;
                 return sparse;
             }
             if(estimatedEntries>8.0e6L || (estimatedEntries>1.0e6L && density<0.0045L) ||
@@ -389,6 +391,24 @@ private:
     LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit) const {
         LPResult out; out.method=methodName(method);
         out.estimatedDenseMemoryBytes=static_cast<double>(estimateDenseLPBytes(m));
+        double pricingMs=0.0,basisSolveMs=0.0,devexMs=0.0,factorizationMs=0.0,ratioTestMs=0.0,lexicographicMs=0.0;
+        std::size_t refactorizations=0,pivots=0,lexicographicSolves=0;
+        bool blandFallbackTriggered=false;
+        struct SparseMetricsScope {
+            LPResult& result; double& pricing; double& basis; double& devex; double& factorization; double& ratio; double& lexicographic;
+            std::size_t& refactorizations; std::size_t& pivots; std::size_t& lexicographicSolves; bool& blandFallbackTriggered;
+            ~SparseMetricsScope() {
+                result.sparsePricingTimeMs=pricing; result.sparseBasisSolveTimeMs=basis;
+                result.sparseDevexTimeMs=devex; result.sparseFactorizationTimeMs=factorization;
+                result.sparseRatioTestTimeMs=ratio; result.sparseLexicographicTimeMs=lexicographic;
+                result.sparseRefactorizations=refactorizations; result.sparsePivots=pivots;
+                result.sparseLexicographicSolves=lexicographicSolves;
+                result.sparseBlandFallbackTriggered=blandFallbackTriggered;
+            }
+        } metricsScope{out,pricingMs,basisSolveMs,devexMs,factorizationMs,ratioTestMs,lexicographicMs,refactorizations,pivots,lexicographicSolves,blandFallbackTriggered};
+        auto addElapsed=[](double& target,const std::chrono::steady_clock::time_point& start) {
+            target+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        };
         const auto standardizationStart=std::chrono::steady_clock::now();
         SparseStandardLP s=standardizeSparse(m,tol_);
         out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();
@@ -426,12 +446,15 @@ private:
         constexpr std::size_t sparseRefactorInterval=15;
         SparseLU factorization; std::vector<EtaUpdate> updates; updates.reserve(sparseRefactorInterval); std::string factorFailure;
         auto refactorBasis=[&]()->bool {
+            const auto factorizationStart=std::chrono::steady_clock::now();
+            ++refactorizations;
             std::vector<std::unordered_map<std::size_t,double>> matrix(R);
             for(std::size_t j=0;j<R;++j) for(const auto& item:columns[basis[j]]) matrix[item.first][j]=item.second;
-            if(!factorization.factor(std::move(matrix),1e-30)) {factorFailure="sparse LU failed at pivot "+std::to_string(factorization.failedAt)+" (magnitude "+std::to_string(factorization.failedPivot)+")";return false;}
+            if(!factorization.factor(std::move(matrix),1e-30)) {addElapsed(factorizationMs,factorizationStart);factorFailure="sparse LU failed at pivot "+std::to_string(factorization.failedAt)+" (magnitude "+std::to_string(factorization.failedPivot)+")";return false;}
             updates.clear();
-            if(!factorization.solve(rhs,xB)) {factorFailure="sparse LU solve failed for the basis right-hand side";return false;}
+            if(!factorization.solve(rhs,xB)) {addElapsed(factorizationMs,factorizationStart);factorFailure="sparse LU solve failed for the basis right-hand side";return false;}
             for(double& v:xB) if(v<0.0&&v>-100.0*tol_.feasibility*(1.0+std::abs(v)))v=0.0;
+            addElapsed(factorizationMs,factorizationStart);
             return true;
         };
         auto solveCurrent=[&](const std::vector<double>& v,std::vector<double>& result)->bool {
@@ -458,43 +481,77 @@ private:
         std::string simplexFailure;
         std::vector<double> cb(R,0.0), y(R,0.0), enteringColumn(R,0.0), direction(R,0.0);
         std::vector<double> devexUnit(R,0.0), devexRow(R,0.0);
+        bool blandPhaseOne=false;
+        std::unordered_set<std::size_t> phaseOneBasisHistory;
+        phaseOneBasisHistory.reserve(std::min<std::size_t>(limit,4096));
+        std::vector<std::size_t> phaseOneRatioTies;
+        phaseOneRatioTies.reserve(R);
         auto simplex=[&](bool phaseOne,std::size_t maxIterations,std::size_t& iterations)->LPStatus {
             for(std::size_t it=0;it<maxIterations;++it) {
+                if(phaseOne && !blandPhaseOne) {
+                    std::size_t hash=static_cast<std::size_t>(1469598103934665603ULL);
+                    for(const std::size_t variable:basis) { hash^=variable+1; hash*=static_cast<std::size_t>(1099511628211ULL); }
+                    // A repeated basis switches the remaining auxiliary pivots
+                    // to Bland entering/leaving order. Hash collisions only
+                    // activate the conservative anti-cycling mode early.
+                    if(!phaseOneBasisHistory.insert(hash).second) { blandPhaseOne=true; blandFallbackTriggered=true; }
+                }
                 std::fill(cb.begin(),cb.end(),0.0);
                 for(std::size_t i=0;i<R;++i) cb[i]=phaseOne?(artificial[basis[i]]?-1.0:0.0):(basis[i]<n?s.c[basis[i]]:0.0);
-                if(!solveCurrentTranspose(cb,y)) {iterations=it;simplexFailure="sparse dual basis solve failed";return LPStatus::NumericalFailure;}
+                auto stageStart=std::chrono::steady_clock::now();
+                if(!solveCurrentTranspose(cb,y)) {addElapsed(basisSolveMs,stageStart);iterations=it;simplexFailure="sparse dual basis solve failed";return LPStatus::NumericalFailure;}
+                addElapsed(basisSolveMs,stageStart);
+                stageStart=std::chrono::steady_clock::now();
                 std::size_t enter=total; double mostPositive=0.0;
                 for(std::size_t j=0;j<total;++j) {
                     if(basic[j] || artificial[j]) continue;
                     double reduced=phaseOne?0.0:(j<n?s.c[j]:0.0);
                     for(const auto& e:columns[j]) reduced-=e.second*y[e.first];
                     if(reduced>tol_.optimality) {
-                        const double score=reduced/std::sqrt(devexWeights[j]);
-                        if(score>mostPositive) { mostPositive=score; enter=j; }
+                        if(phaseOne && blandPhaseOne) {
+                            if(enter==total) { mostPositive=reduced; enter=j; }
+                        } else {
+                            const double score=reduced/std::sqrt(devexWeights[j]);
+                            if(score>mostPositive) { mostPositive=score; enter=j; }
+                        }
                     }
                 }
+                addElapsed(pricingMs,stageStart);
                 if(enter==total) { iterations=it; return LPStatus::Optimal; }
                 std::fill(enteringColumn.begin(),enteringColumn.end(),0.0);
                 for(const auto& e:columns[enter]) enteringColumn[e.first]=e.second;
-                if(!solveCurrent(enteringColumn,direction)) {iterations=it;simplexFailure="sparse primal basis solve failed";return LPStatus::NumericalFailure;}
+                stageStart=std::chrono::steady_clock::now();
+                if(!solveCurrent(enteringColumn,direction)) {addElapsed(basisSolveMs,stageStart);iterations=it;simplexFailure="sparse primal basis solve failed";return LPStatus::NumericalFailure;}
+                addElapsed(basisSolveMs,stageStart);
                 const double stablePivot=std::max(tol_.pivot,1e-8);
+                stageStart=std::chrono::steady_clock::now();
                 double minRatio=std::numeric_limits<double>::infinity();
                 for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot)
                     minRatio=std::min(minRatio,std::max(0.0,xB[i])/direction[i]);
                 if(!std::isfinite(minRatio)) { iterations=it; return LPStatus::Unbounded; }
                 const double relaxed=minRatio+tol_.feasibility*(1.0+std::abs(minRatio));
                 std::size_t leave=R; double bestPivot=-1.0;
-                std::vector<double> leaveLex;
-                for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot) {
-                    const double ratio=std::max(0.0,xB[i])/direction[i];
-                    if(phaseOne) {
-                        if(leave==R || ratio<minRatio) { minRatio=ratio; leave=i; }
-                        else if(ratio==minRatio) {
-                            // Lexicographic ratio tie-break prevents degenerate
-                            // phase-I pivots from revisiting the same basis.
+                if(phaseOne) {
+                    phaseOneRatioTies.clear();
+                    for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot &&
+                        std::max(0.0,xB[i])/direction[i]==minRatio) phaseOneRatioTies.push_back(i);
+                    // Exact lexicographic perturbation is valuable on small
+                    // tie sets. On large sets its repeated transpose solves
+                    // cost more than the sparse pivot itself; use a stable
+                    // row tie-break and activate full Bland order if a basis
+                    // actually repeats. The work budget scales with tie count.
+                    const bool useLexicographic = !blandPhaseOne && phaseOneRatioTies.size()>1 &&
+                        phaseOneRatioTies.size() <= std::max<std::size_t>(1,8192/std::max<std::size_t>(R,1));
+                    if(useLexicographic) {
+                        leave=phaseOneRatioTies.front();
+                        std::vector<double> leaveLex;
+                        for(std::size_t index=1;index<phaseOneRatioTies.size();++index) {
+                            const std::size_t i=phaseOneRatioTies[index];
                             std::vector<double> unit(R,0.0), candidateLex(R); unit[i]=1.0;
-                            if(!solveCurrentTranspose(unit,candidateLex)){iterations=it;simplexFailure="sparse lexicographic ratio solve failed";return LPStatus::NumericalFailure;}
-                            if(leaveLex.empty()) {std::vector<double> leavingUnit(R,0.0);leavingUnit[leave]=1.0;if(!solveCurrentTranspose(leavingUnit,leaveLex)){iterations=it;simplexFailure="sparse lexicographic tie solve failed";return LPStatus::NumericalFailure;}}
+                            auto lexStart=std::chrono::steady_clock::now(); ++lexicographicSolves;
+                            if(!solveCurrentTranspose(unit,candidateLex)){addElapsed(lexicographicMs,lexStart);iterations=it;simplexFailure="sparse lexicographic ratio solve failed";return LPStatus::NumericalFailure;}
+                            addElapsed(lexicographicMs,lexStart);
+                            if(leaveLex.empty()) {std::vector<double> leavingUnit(R,0.0);leavingUnit[leave]=1.0;lexStart=std::chrono::steady_clock::now();++lexicographicSolves;if(!solveCurrentTranspose(leavingUnit,leaveLex)){addElapsed(lexicographicMs,lexStart);iterations=it;simplexFailure="sparse lexicographic tie solve failed";return LPStatus::NumericalFailure;}addElapsed(lexicographicMs,lexStart);}
                             for(std::size_t k=0;k<R;++k) {
                                 const double lhs=candidateLex[k]/direction[i];
                                 const double rhsLex=leaveLex[k]/direction[leave];
@@ -502,13 +559,23 @@ private:
                                 if(lhs>rhsLex) break;
                             }
                         }
-                    } else if(ratio<=relaxed && direction[i]>bestPivot) { leave=i; bestPivot=direction[i]; }
+                    } else {
+                        for(const std::size_t i:phaseOneRatioTies)
+                            if(leave==R || (blandPhaseOne ? basis[i]<basis[leave] : i<leave)) leave=i;
+                    }
+                } else {
+                    for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot) {
+                        const double ratio=std::max(0.0,xB[i])/direction[i];
+                        if(ratio<=relaxed && direction[i]>bestPivot) { leave=i; bestPivot=direction[i]; }
+                    }
                 }
+                addElapsed(ratioTestMs,stageStart);
                 if(leave==R) { iterations=it; return LPStatus::NumericalFailure; }
                 const double pivotValue=direction[leave];
                 const double theta=std::max(0.0,xB[leave])/pivotValue;
+                stageStart=std::chrono::steady_clock::now();
                 std::fill(devexUnit.begin(),devexUnit.end(),0.0); devexUnit[leave]=1.0;
-                if(!solveCurrentTranspose(devexUnit,devexRow)) {iterations=it;simplexFailure="sparse Devex row solve failed";return LPStatus::NumericalFailure;}
+                if(!solveCurrentTranspose(devexUnit,devexRow)) {addElapsed(devexMs,stageStart);iterations=it;simplexFailure="sparse Devex row solve failed";return LPStatus::NumericalFailure;}
                 long double directionNormSquared=0.0L;
                 for(double value:direction) directionNormSquared+=static_cast<long double>(value)*value;
                 const double pivotSquared=pivotValue*pivotValue;
@@ -525,6 +592,7 @@ private:
                     devexWeights=devexResetWeights;
                     devexUpdatesSinceReset=0;
                 }
+                addElapsed(devexMs,stageStart);
                 updates.push_back({leave,direction});
                 for(std::size_t i=0;i<R;++i) if(i!=leave) {
                     const double q=direction[i];
@@ -533,6 +601,7 @@ private:
                 }
                 xB[leave]=theta;
                 basic[basis[leave]]=false; basis[leave]=enter; basic[enter]=true;
+                ++pivots;
                 iterations=it+1;
                 if((it+1)%sparseRefactorInterval==0 && !refactorBasis()) {iterations=it+1;simplexFailure=factorFailure;return LPStatus::NumericalFailure;}
                 if(it+1==maxIterations) return LPStatus::IterationLimit;
