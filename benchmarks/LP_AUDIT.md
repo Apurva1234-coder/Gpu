@@ -122,3 +122,20 @@ The sparse Phase I ratio test now estimates tie work as `tie count × basis dime
 These are time-to-failure changes: Bandm, Scagr25, and Pilot still fail and produce no verified optimum. Do not describe them as solved-model speedups. The experiment proves the expensive Pilot lexicographic work was a material part of the diagnostic path, but its early sparse-LU pivot failure remains the blocking correctness issue.
 
 Rejected experiments were also measured: always using Bland’s rule raised Scagr25 from 794 ms to 2,361 ms and Pilot from 1,438 ms to 2,965 ms, with both still failing; changing the fixed refactor interval from 15 to 30 caused Pilot to fail after 60 pivots and did not establish a safe general improvement. Both settings were discarded. Pricing and factorization improvements still need to preserve verified solutions, and Devex pricing/factorization remain open work.
+
+## Phase 7 CPU PDHG measurements
+
+The CPU PDHG path now tests ergodic averages of primal/dual iterates every 25 steps, stores the recovered average only when all residual checks pass, builds a CSC view once for cache-friendly `A^T y`, and releases the temporary triplet buffer after CSR construction. It now reports scaled primal, dual, and complementarity residuals. A result remains `OPTIMAL` only when those residuals, the absolute original-model feasibility tolerance, finite-value checks, and scaled original-model feasibility all pass. Non-PDHG CLI residual fields are `N/A`, not fabricated zeroes.
+
+For an A/B check, the Phase 6 commit's PDHG header was compiled as a baseline and compared with the current CPU PDHG implementation using MinGW GCC 6.3 `-O2 -DNDEBUG`, 3 repetitions, presolve enabled, 50,000 iterations, and an 8-second per-process timeout. Raw data: `lp_audit_phase7_pdhg_50k_baseline.json` and `lp_audit_phase7_pdhg_50k_average_csc.json`.
+
+| Model | Baseline solve ms / status | Average + CSC solve ms / status | Current median residuals (primal / dual / complementarity) |
+|---|---:|---:|---:|
+| AFIRO | 38.521 / ITERATION_LIMIT | 37.256 / ITERATION_LIMIT | 3.14e-6 / 8.29e-2 / 1.11e-1 |
+| Bandm | 1,100.701 / ITERATION_LIMIT | 989.869 / ITERATION_LIMIT | 1.99e-4 / 5.33e-1 / 3.66e-4 |
+| Scagr25 | 849.643 / ITERATION_LIMIT | 813.007 / ITERATION_LIMIT | 1.70e-4 / 1.64e-2 / 3.34e-1 |
+| Pilot | TIMEOUT at 8 s | TIMEOUT at 8 s | No result |
+
+The 3–10% timing differences are not usable solve speedups: no benchmark reached the required convergence and verification criteria. The observed iterates do not justify routing these Netlib cases to PDHG as a way to obtain answers. The extra CSC storage and iterate averages therefore remain a CPU-path implementation experiment, not evidence that PDHG is ready for production large LPs.
+
+A small unit fixture (`x + y >= 1`, minimize `x + y`) also ran 100,000 iterations. It recovered a feasible objective-1 point but still reported `ITERATION_LIMIT`; the test asserts it cannot be labeled `OPTIMAL` without the required residuals. The original absolute-feasibility check now also gates convergence, preventing an internally scaled residual from masking a failed original-model check. Remaining CPU PDHG work includes better diagonal equilibration/acceleration and a converged medium/large benchmark; no such improvement is claimed here.

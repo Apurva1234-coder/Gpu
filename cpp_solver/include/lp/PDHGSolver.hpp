@@ -57,6 +57,8 @@ public:
             }
         }
         nla::CSRMatrix matrix(rows, columns, entries, tolerance_.zero);
+        entries.clear();
+        entries.shrink_to_fit();
         // standardizeSparse exposes an equivalent MAX objective; PDHG uses
         // the minimization convention and therefore negates that vector.
         std::vector<double> cost(columns);
@@ -89,6 +91,17 @@ public:
 
         std::vector<double> primal(columns, 0.0), dual(rows, 0.0);
         std::vector<double> extrapolated(columns, 0.0), activity(rows), gradient(columns);
+        std::vector<double> primalSum(columns, 0.0), dualSum(rows, 0.0);
+        std::vector<double> averagePrimal(columns, 0.0), averageDual(rows, 0.0);
+        const auto recoverPrimal = [&](const std::vector<double>& transformed) {
+            std::vector<double> recovered(model.variables.size(), 0.0);
+            for (std::size_t j = 0; j < columns; ++j)
+                recovered[standard.map[j].first] += standard.map[j].second * transformed[j];
+            for (const auto& variable : model.variables)
+                if (variable.active && std::isfinite(variable.lower))
+                    recovered[variable.originalId] += variable.lower;
+            return recovered;
+        };
         double primalResidual = std::numeric_limits<double>::infinity();
         double dualResidual = std::numeric_limits<double>::infinity();
         double complementarity = std::numeric_limits<double>::infinity();
@@ -108,6 +121,21 @@ public:
             const auto& rowPtr = matrix.rowPointers();
             const auto& columnIndex = matrix.columnIndices();
             const auto& values = matrix.values();
+            // Keep CSR for A*x and build a compact CSC view for A^T*y. The
+            // former row-wise scatter wrote to columns in an irregular order.
+            std::vector<std::size_t> transposePointers(columns + 1, 0);
+            for (const std::size_t column : columnIndex) ++transposePointers[column + 1];
+            for (std::size_t j = 1; j < transposePointers.size(); ++j)
+                transposePointers[j] += transposePointers[j - 1];
+            std::vector<std::size_t> transposeRows(values.size());
+            std::vector<double> transposeValues(values.size());
+            std::vector<std::size_t> transposeCursor = transposePointers;
+            for (std::size_t i = 0; i < rows; ++i)
+                for (std::size_t k = rowPtr[i]; k < rowPtr[i + 1]; ++k) {
+                    const std::size_t destination = transposeCursor[columnIndex[k]]++;
+                    transposeRows[destination] = i;
+                    transposeValues[destination] = values[k];
+                }
             const auto multiply = [&](const std::vector<double>& x, std::vector<double>& y) {
                 std::fill(y.begin(), y.end(), 0.0);
                 for (std::size_t i = 0; i < rows; ++i)
@@ -116,14 +144,15 @@ public:
             };
             const auto transposeMultiply = [&](const std::vector<double>& y, std::vector<double>& x) {
                 std::fill(x.begin(), x.end(), 0.0);
-                for (std::size_t i = 0; i < rows; ++i)
-                    for (std::size_t k = rowPtr[i]; k < rowPtr[i + 1]; ++k)
-                        x[columnIndex[k]] += values[k] * y[i];
+                for (std::size_t j = 0; j < columns; ++j)
+                    for (std::size_t k = transposePointers[j]; k < transposePointers[j + 1]; ++k)
+                        x[j] += transposeValues[k] * y[transposeRows[k]];
             };
 
-            const auto measure = [&]() {
-                multiply(primal, activity);
-                transposeMultiply(dual, gradient);
+            const auto measure = [&](const std::vector<double>& checkPrimal,
+                                     const std::vector<double>& checkDual) {
+                multiply(checkPrimal, activity);
+                transposeMultiply(checkDual, gradient);
                 for (std::size_t j = 0; j < columns; ++j) gradient[j] += cost[j];
                 primalResidual = dualResidual = complementarity = 0.0;
                 std::vector<double> stationarityScale(columns, 1.0);
@@ -134,18 +163,18 @@ public:
                     double dualScale = std::abs(standard.b[i]);
                     for (std::size_t k = rowPtr[i]; k < rowPtr[i + 1]; ++k) {
                         const auto j = columnIndex[k];
-                        activityScale += std::abs(values[k] * primal[j]);
-                        dualScale += std::abs(values[k] * primal[j]);
-                        stationarityScale[j] += std::abs(values[k] * dual[i]);
+                        activityScale += std::abs(values[k] * checkPrimal[j]);
+                        dualScale += std::abs(values[k] * checkPrimal[j]);
+                        stationarityScale[j] += std::abs(values[k] * checkDual[i]);
                     }
                     primalResidual = std::max(primalResidual,
                         std::max(0.0, activity[i] - standard.b[i]) / activityScale);
                     complementarity = std::max(complementarity,
-                        std::abs(dual[i] * (standard.b[i] - activity[i])) /
-                        (1.0 + std::abs(dual[i]) * dualScale));
+                        std::abs(checkDual[i] * (standard.b[i] - activity[i])) /
+                        (1.0 + std::abs(checkDual[i]) * dualScale));
                 }
                 for (std::size_t j = 0; j < columns; ++j) {
-                    const double residual = primal[j] > 1e-8
+                    const double residual = checkPrimal[j] > 1e-8
                         ? std::abs(gradient[j]) : std::max(0.0, -gradient[j]);
                     dualResidual = std::max(dualResidual, residual / stationarityScale[j]);
                 }
@@ -161,27 +190,41 @@ public:
                     const double previous = primal[j];
                     primal[j] = std::max(0.0, previous - tau[j] * (cost[j] + gradient[j]));
                     extrapolated[j] = 2.0 * primal[j] - previous;
+                    primalSum[j] += primal[j];
                 }
+                for (std::size_t i = 0; i < rows; ++i) dualSum[i] += dual[i];
                 if (iterations % checkInterval == 0 || iterations == limit) {
-                    measure();
-                    if (primalResidual <= target && dualResidual <= target && complementarity <= target)
-                        break;
+                    const double count = static_cast<double>(iterations);
+                    for (std::size_t j = 0; j < columns; ++j) averagePrimal[j] = primalSum[j] / count;
+                    for (std::size_t i = 0; i < rows; ++i) averageDual[i] = dualSum[i] / count;
+                    measure(averagePrimal, averageDual);
+                    if (primalResidual <= target && dualResidual <= target && complementarity <= target) {
+                        const auto candidate = recoverPrimal(averagePrimal);
+                        if (originalResidual(model, candidate) <= tolerance_.feasibility &&
+                            scaledOriginalResidual(model, candidate) <= 1e-7) {
+                            primal = averagePrimal;
+                            dual = averageDual;
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         result.iterations = iterations;
-        result.solution.primal.assign(model.variables.size(), 0.0);
-        for (std::size_t j = 0; j < columns; ++j)
-            result.solution.primal[standard.map[j].first] += standard.map[j].second * primal[j];
-        for (const auto& variable : model.variables)
-            if (variable.active && std::isfinite(variable.lower))
-                result.solution.primal[variable.originalId] += variable.lower;
+        result.solution.primal = recoverPrimal(primal);
         result.objectiveValue = evaluateObjective(model, result.solution.primal);
         result.solution.objectiveValue = result.objectiveValue;
         result.solution.optimalityResidual = dualResidual;
         result.solution.feasibilityResidual = originalResidual(model, result.solution.primal);
-        if (primalResidual <= target && dualResidual <= target && complementarity <= target &&
+        result.primalResidual=primalResidual;
+        result.dualResidual=dualResidual;
+        result.complementarityResidual=complementarity;
+        const bool finiteCandidate = std::isfinite(result.objectiveValue) &&
+            std::all_of(result.solution.primal.begin(), result.solution.primal.end(),
+                [](double value) { return std::isfinite(value); });
+        if (finiteCandidate && primalResidual <= target && dualResidual <= target &&
+            complementarity <= target && result.solution.feasibilityResidual <= tolerance_.feasibility &&
             scaledOriginalResidual(model, result.solution.primal) <= 1e-7) {
             result.status = LPStatus::Optimal;
             result.message = completedOnGpu ? "PDHG converged on CUDA" : "PDHG converged";

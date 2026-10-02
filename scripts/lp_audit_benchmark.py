@@ -51,6 +51,9 @@ INTEGER_FIELDS = {
 }
 FLOAT_FIELDS = {
     "estimated_dense_memory_bytes": "Estimated dense memory bytes",
+    "primal_residual": "Primal residual",
+    "dual_residual": "Dual residual",
+    "complementarity_residual": "Complementarity residual",
 }
 TEXT_FIELDS = {
     "presolve_termination": "Presolve termination",

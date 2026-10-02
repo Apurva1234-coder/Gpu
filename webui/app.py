@@ -570,6 +570,7 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "relative_gap": _capture(r"^Relative Gap:\s*([^\r\n]+)$", output, None, float),
         "primal_residual": _capture(r"^Primal residual:\s*([^\r\n]+)$", output, None, float),
         "dual_residual": _capture(r"^Dual residual:\s*([^\r\n]+)$", output, None, float),
+        "complementarity_residual": _capture(r"^Complementarity residual:\s*([^\r\n]+)$", output, None, float),
         "feasibility": _capture(r"^Feasibility:\s*([^\r\n]+)$", output, None, float),
         "iteration_limit": _capture(r"^Iteration limit:\s*(.+)$", output, None),
         "attempt_count": _capture(r"^Attempt count:\s*(\d+)$", output, None, int),

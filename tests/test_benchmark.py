@@ -43,6 +43,9 @@ Sparse refactorizations: 4
 Sparse pivots: 19
 Sparse lexicographic solves: 7
 Sparse Bland fallback: YES
+Primal residual: 1e-9
+Dual residual: 2e-9
+Complementarity residual: 3e-9
 Problem Type: LP
 Status: OPTIMAL
 Iterations: 2
@@ -247,6 +250,12 @@ ENDATA
         self.assertEqual(result["sparse_pivots"], 19)
         self.assertEqual(result["sparse_lexicographic_solves"], 7)
         self.assertTrue(result["sparse_bland_fallback_triggered"])
+
+    def test_primal_dual_and_complementarity_residuals_are_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["primal_residual_reported"], 1e-9)
+        self.assertEqual(result["dual_residual"], 2e-9)
+        self.assertEqual(result["complementarity_residual"], 3e-9)
 
     def test_original_model_verification_bounds_integrality_and_objective(self):
         model = parse_problem_file(str(ROOT / "examples" / "milp_relaxation.json"))

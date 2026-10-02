@@ -263,7 +263,7 @@ def _parse_solver_output(output: str, returncode: int) -> dict[str, Any]:
         "primal_names": _names(output),
         "primal_residual_reported": _first_number(_field(output, "Primal residual"), _field(output, "Feasibility")),
         "dual_residual": _float(_field(output, "Dual residual")),
-        "complementarity_residual": _float(_field(output, "Complementarity")),
+        "complementarity_residual": _first_number(_field(output, "Complementarity residual"), _field(output, "Complementarity")),
         "convexity": _field(output, "Convexity"),
         "hessian_type": _field(output, "Hessian"),
         "failure_reason": None if status in {"OPTIMAL", "FEASIBLE", "INFEASIBLE", "UNBOUNDED"} else (output.strip()[-1200:] or f"solver exited {returncode}"),
