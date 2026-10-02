@@ -61,3 +61,23 @@ Presolve pass telemetry from the instrumented run showed diminishing returns. Fo
 - The Auto result panel now shows each attempt and its measured time/iterations, including why a fallback was skipped.
 
 The Phase 2 tests cover attempt history, preserved presolve configuration, and dense-fallback memory eligibility. No solver speedup claim is made from this change. Presolve adaptation, comprehensive guards for manually selected dense algorithms, and structure-based algorithm dispatch remain open.
+
+## Phase 3 changes and measurement
+
+- Fixed-variable elimination now builds a variable-to-row adjacency index once for each elimination batch and touches only rows containing each fixed variable. This replaces the prior fixed-variable × all-rows scan.
+- LP presolve stops after diminishing returns on models with at least 2,000 combined variables, rows, and stored entries. The stop condition uses both benefit and cost: stop if the reduction falls below the larger of 0.05% or 2.5% of the best reduction so far, or if reduction per millisecond falls below 2.5% of the best pass. There is still a hard 10-pass safety limit. Non-LP presolve keeps its existing pass behavior.
+- Large LP Auto runs receive a pass-boundary time budget equal to 5% of the request limit, bounded from 25 ms to 2 seconds. A pass is not interrupted mid-operation; the profile below shows why this is only a between-pass budget.
+- CLI/API/benchmark output includes the presolve stop reason and configured budget. `scripts/lp_audit_benchmark.py` accepts `--presolve-time-ms` for controlled budget tests.
+
+The Phase 3 profile compares commit `df48c6f` (Phase 2) with the current implementation using MSVC x64 Release builds on the same Windows 11 machine. Both used the same four local Netlib models, 3 repetitions, presolve on, 500 iterations per simplex phase, and an 8-second process timeout. Raw samples are in `benchmarks/lp_audit_phase3.json`.
+
+| Model | Phase 2 presolve ms / passes | Phase 3 presolve ms / passes | Phase 2 result | Phase 3 result |
+|---|---:|---:|---|---|
+| AFIRO | 0.135 / 2 | 0.117 / 2 | OPTIMAL, verification PASS | OPTIMAL, verification PASS |
+| Bandm | 9.952 / 10 | 5.334 / 5 | NUMERICAL_FAILURE, verification FAIL | ITERATION_LIMIT, no candidate |
+| Scagr25 | 8.709 / 10 | 4.487 / 4 | ITERATION_LIMIT, no candidate | ITERATION_LIMIT, no candidate |
+| Pilot | 121.947 / 7 | 45.670 / 2 | NUMERICAL_FAILURE, no candidate | NUMERICAL_FAILURE, no candidate |
+
+The Pilot presolve stage measured 62.5% lower (121.947 ms to 45.670 ms) with five fewer passes and six fewer total recorded reductions; the first pass still removes 204 fixed variables. Bandm and Scagr25 presolve stages measured 46% and 48% lower, respectively, after five and four passes instead of ten. AFIRO remained verified optimal with effectively unchanged presolve time. These are presolve-stage comparisons, not a claim that LP solving is fixed: Bandm/Pilot still do not solve, and the Bandm status changed from numerical failure to the bounded iteration limit. Solver-time differences across changed reduced models must not be interpreted as same-problem algorithm speedups. The 500-iteration cap is diagnostic.
+
+The budget check runs only between passes. A deliberately 1 ms budget on Pilot stopped after its first pass at 32.8 ms, so a single expensive pass can exceed the budget. A finer-grained interrupt/checkpoint inside transformations remains future work.

@@ -56,6 +56,7 @@ class SolverPolicy:
     )
     PROBLEM_WEIGHTS = {"LP": 1.0, "QP": 1.25, "MILP": 2.5}
     DENSE_FALLBACK_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
+    ADAPTIVE_PRESOLVE_WORK_THRESHOLD = 2_000
 
     @classmethod
     def complexity(cls, analysis: dict[str, Any]) -> float:

@@ -1,6 +1,7 @@
 #pragma once
 #include "model/Model.hpp"
 #include <cstddef>
+#include <string>
 #include <vector>
 namespace sovereign {
 struct FixedVariableRecord { std::size_t originalId; double value; };
@@ -20,7 +21,7 @@ struct PresolvePassStats {
     std::size_t singletonReductions{}, redundantRowsRemoved{};
     double percentageReduction{};
 };
-struct PresolveResult { Model model; PresolveStatus status{PresolveStatus::Unchanged}; PresolveStats stats; ReductionHistory history; std::vector<PresolvePassStats> passStats; };
+struct PresolveResult { Model model; PresolveStatus status{PresolveStatus::Unchanged}; PresolveStats stats; ReductionHistory history; std::vector<PresolvePassStats> passStats; std::string terminationReason; };
 inline std::size_t activeVariableCount(const Model& model) {
     std::size_t count = 0;
     for (const auto& variable : model.variables) count += variable.active ? 1 : 0;

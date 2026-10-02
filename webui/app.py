@@ -543,6 +543,8 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
                 continue
         variables = sparse_variables
     presolve = {
+        "termination_reason": _capture(r"^Presolve termination:\s*([^\r\n]+)$", output, None),
+        "time_budget_ms": _capture(r"^Presolve time budget ms:\s*([^\r\n]+)$", output, None, float),
         "before_variables": _capture(r"^Variables:\s*(\d+)$", output, None, int),
         "before_constraints": _capture(r"^Constraints:\s*(\d+)$", output, None, int),
         "after_variables": _capture(r"^Final variables:\s*(\d+)$", output, None, int),
@@ -901,6 +903,13 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
     model_size = SolverPolicy.limits_for(job["analysis"])[0].name
     configuration["model_size"] = model_size
     configuration["problem_type"] = str(job["analysis"].get("problem_type", "UNKNOWN")).upper()
+    presolve_work = sum(max(0, int(job["analysis"].get(key, 0))) for key in ("variables", "constraints", "nonzeros"))
+    requested_time_limit = int(configuration.get("time_limit_seconds", 0))
+    if (configuration.get("problem_type") == "LP" and configuration.get("presolve", True)
+            and presolve_work >= SolverPolicy.ADAPTIVE_PRESOLVE_WORK_THRESHOLD and requested_time_limit > 0):
+        configuration["presolve_time_limit_ms"] = min(2000.0, max(25.0, requested_time_limit * 50.0))
+    else:
+        configuration["presolve_time_limit_ms"] = 0.0
     # Auto always selects an in-house Sovereign algorithm. Reference solvers
     # are used only by the separate, explicitly requested comparison route.
     if configuration.get("method") == "auto":
@@ -940,6 +949,8 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         command.extend(["--method", configuration["method"]])
     if not configuration["presolve"]:
         command.append("--no-presolve")
+    if configuration.get("presolve_time_limit_ms", 0.0) > 0:
+        command.extend(["--presolve-time-ms", str(configuration["presolve_time_limit_ms"])])
     if configuration["method"] not in {"cutting-plane", "feasibility-pump", "lp-relaxation"}:
         command.extend(["--max-iterations", str(configuration["max_iterations"])])
     if configuration["method"] == "milp":

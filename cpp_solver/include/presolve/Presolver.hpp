@@ -9,12 +9,21 @@
 namespace sovereign {
 class Presolver {
 public:
-    explicit Presolver(Tolerance tolerance = {}, std::size_t maxPasses = 10) : tol_(tolerance), maxPasses_(maxPasses) {}
+    explicit Presolver(Tolerance tolerance = {}, std::size_t maxPasses = 10, double timeBudgetMs = 0.0, bool adaptive = false)
+        : tol_(tolerance), maxPasses_(maxPasses), timeBudgetMs_(timeBudgetMs), adaptive_(adaptive) {}
     PresolveResult run(Model model) const {
+        const auto runStart = std::chrono::steady_clock::now();
         PresolveResult result{std::move(model)};
         bool changed = false;
         PresolvePassStats previousPass;
+        double bestReduction = 0.0;
+        double bestReductionPerMs = 0.0;
         for (std::size_t pass = 1; pass <= maxPasses_; ++pass) {
+            if (pass > 1 && timeBudgetMs_ > 0.0 &&
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - runStart).count() >= timeBudgetMs_) {
+                result.terminationReason = "time_budget";
+                break;
+            }
             const auto passStart = std::chrono::steady_clock::now();
             PresolvePassStats passStats;
             passStats.pass = pass;
@@ -52,16 +61,29 @@ public:
             passStats.timeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count();
             result.passStats.push_back(passStats);
             previousPass = passStats;
-            if (foundContradiction) { result.status = PresolveStatus::Infeasible; return result; }
-            if (!changed) break;
+            if (foundContradiction) { result.status = PresolveStatus::Infeasible; result.terminationReason = "infeasible"; return result; }
+            if (!changed) { result.terminationReason = "no_reductions"; break; }
+            const std::size_t passWork = passStats.variablesBefore + passStats.constraintsBefore + passStats.nonzerosBefore;
+            const double worthwhileThreshold = std::max(0.05, bestReduction * 0.025);
+            const double reductionPerMs = passStats.percentageReduction / std::max(passStats.timeMs, 1e-9);
+            const bool diminishingBenefit = passStats.percentageReduction < worthwhileThreshold;
+            const bool diminishingReturnPerCost = bestReductionPerMs > 0.0 && reductionPerMs < bestReductionPerMs * 0.025;
+            if (adaptive_ && pass >= 2 && passWork >= adaptiveWorkThreshold_ && (diminishingBenefit || diminishingReturnPerCost)) {
+                result.terminationReason = "diminishing_returns";
+                break;
+            }
+            bestReduction = std::max(bestReduction, passStats.percentageReduction);
+            bestReductionPerMs = std::max(bestReductionPerMs, reductionPerMs);
+            if (pass == maxPasses_) result.terminationReason = "max_passes";
         }
+        if (result.terminationReason.empty()) result.terminationReason = "max_passes";
         if (infeasibleRows(result.model)) result.status = PresolveStatus::Infeasible;
         else if (unbounded(result.model)) result.status = PresolveStatus::Unbounded;
         else if (result.stats.boundTightenings || result.stats.fixedVariables || result.stats.redundantRows || result.stats.singletonReductions) result.status = PresolveStatus::Reduced;
         return result;
     }
 private:
-    Tolerance tol_; std::size_t maxPasses_;
+    Tolerance tol_; std::size_t maxPasses_; double timeBudgetMs_; bool adaptive_; static constexpr std::size_t adaptiveWorkThreshold_ = 2000;
     static double value(const std::unordered_map<std::size_t,double>& a, std::size_t i) { auto it=a.find(i); return it==a.end()?0.0:it->second; }
     bool tighten(Model& m, PresolveStats& s, ReductionHistory& h) const {
         bool changed=false;
@@ -79,7 +101,12 @@ private:
     bool satisfies(double x, Relation r, double b) const { return r==Relation::Equal?std::abs(x-b)<=tol_.feasibility:r==Relation::LessEqual?x<=b+tol_.feasibility:x>=b-tol_.feasibility; }
     bool fixed(Model& m, PresolveStats& s, ReductionHistory& h, std::size_t& nonzerosRemoved) const {
         std::vector<std::size_t> gone; for(std::size_t i=0;i<m.variables.size();++i) if(m.variables[i].active&&std::isfinite(m.variables[i].lower)&&std::isfinite(m.variables[i].upper)&&tol_.equal(m.variables[i].lower,m.variables[i].upper)) gone.push_back(i);
-        if(gone.empty()) return false; for(auto i:gone){double x=m.variables[i].lower;h.fixed.push_back({m.variables[i].originalId,x});m.objectiveConstant+=value(m.objective,i)*x+value(m.quadratic,i)*x*x;m.objective.erase(i);m.quadratic.erase(i);for(auto& r:m.constraints)if(r.active){r.rhs-=value(r.coefficients,i)*x;nonzerosRemoved+=r.coefficients.erase(i);}m.variables[i].active=false;++s.fixedVariables;++s.eliminatedVariables;}m.rebuildMappings();
+        if(gone.empty()) return false;
+        std::vector<std::vector<std::size_t>> variableRows(m.variables.size());
+        for(std::size_t row=0;row<m.constraints.size();++row) if(m.constraints[row].active)
+            for(const auto& coefficient:m.constraints[row].coefficients)
+                if(coefficient.first<variableRows.size()) variableRows[coefficient.first].push_back(row);
+        for(auto i:gone){double x=m.variables[i].lower;h.fixed.push_back({m.variables[i].originalId,x});m.objectiveConstant+=value(m.objective,i)*x+value(m.quadratic,i)*x*x;m.objective.erase(i);m.quadratic.erase(i);for(auto row:variableRows[i]){auto& r=m.constraints[row];if(!r.active)continue;auto coefficient=r.coefficients.find(i);if(coefficient!=r.coefficients.end()){r.rhs-=coefficient->second*x;r.coefficients.erase(coefficient);++nonzerosRemoved;}}m.variables[i].active=false;++s.fixedVariables;++s.eliminatedVariables;}m.rebuildMappings();
         return true;
     }
     bool substitute(Model& m, PresolveStats& s, ReductionHistory& h, std::size_t& nonzerosRemoved) const {

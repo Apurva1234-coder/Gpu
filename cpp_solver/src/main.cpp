@@ -78,6 +78,7 @@ int main(int argc,char** argv){
  if(argc<3||std::string(argv[1])!="--input"){std::cerr<<"usage: --input <file> [--method revised-simplex|dual-simplex|ipm|pdhg|qp] [--max-iterations N (0 = unlimited)]\n";return 2;}
  try {
   std::size_t maxIterations=10000,maxNodes=10000;
+  double presolveTimeBudgetMs=0.0;
   cuda::Backend requestedBackend=cuda::Backend::CPU;
   int device=0;
   bool iterative=false,presolveEnabled=true,sparsePrimal=false,selectBackendOnly=false;
@@ -85,6 +86,7 @@ int main(int argc,char** argv){
   for(int i=3;i<argc;++i){
    if(i+1<argc&&std::string(argv[i])=="--max-iterations"){maxIterations=std::stoull(argv[i+1]);if(maxIterations==0)maxIterations=std::numeric_limits<std::size_t>::max();}
    if(i+1<argc&&std::string(argv[i])=="--max-nodes")maxNodes=std::stoull(argv[i+1]);
+   if(i+1<argc&&std::string(argv[i])=="--presolve-time-ms")presolveTimeBudgetMs=std::stod(argv[i+1]);
    if(i+1<argc&&std::string(argv[i])=="--backend"){std::string b=argv[i+1];if(b!="cpu"&&b!="cuda"&&b!="auto")throw std::invalid_argument("--backend must be cpu, cuda, or auto");requestedBackend=cuda::parseBackend(b);}
    if(i+1<argc&&std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);
    if(i+1<argc&&std::string(argv[i])=="--model-size")modelSize=argv[i+1];
@@ -116,11 +118,11 @@ int main(int argc,char** argv){
   if(gpu.available()&&selectedBackend==cuda::Backend::CUDA)cuda::Context::setDefault(&gpu);
   auto cls=classify(model);
   auto presolveStart=std::chrono::steady_clock::now();
-  auto red=presolveEnabled?Presolver{}.run(model):PresolveResult{model};
+  auto red=presolveEnabled?Presolver({},10,cls.type==ProblemType::LP?presolveTimeBudgetMs:0.0,cls.type==ProblemType::LP).run(model):PresolveResult{model};
   double presolveMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presolveStart).count();
   LPMethod method=LPMethod::RevisedSimplex;
   for(int i=3;i+1<argc;++i)if(std::string(argv[i])=="--method"){std::string x=argv[i+1];if(x=="dual-simplex")method=LPMethod::DualSimplex;else if(x=="ipm")method=LPMethod::IPM;else if(x=="pdhg")method=LPMethod::PDHG;}
-  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nResolved algorithm: "<<selectedAlgorithm<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nC++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\nPRESOLVE\nFinal variables: "<<activeVariableCount(red.model)<<"\nFinal constraints: "<<activeConstraintCount(red.model)<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
+  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nResolved algorithm: "<<selectedAlgorithm<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nC++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nPresolve time budget ms: "<<presolveTimeBudgetMs<<"\nPresolve termination: "<<red.terminationReason<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\nPRESOLVE\nFinal variables: "<<activeVariableCount(red.model)<<"\nFinal constraints: "<<activeConstraintCount(red.model)<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
   for(const auto& pass:red.passStats)std::cout<<"Presolve pass: "<<pass.pass<<" time_ms="<<pass.timeMs<<" variables="<<pass.variablesBefore<<"->"<<pass.variablesAfter<<" constraints="<<pass.constraintsBefore<<"->"<<pass.constraintsAfter<<" nnz="<<pass.nonzerosBefore<<"->"<<pass.nonzerosAfter<<" bound_tightenings="<<pass.boundTightenings<<" fixed_variables="<<pass.fixedVariables<<" substitutions="<<pass.substitutions<<" singleton_reductions="<<pass.singletonReductions<<" redundant_rows="<<pass.redundantRowsRemoved<<" reduction_percent="<<pass.percentageReduction<<"\n";
   std::cout<<std::flush;
   bool qp=false,relax=false;LPMethod lpMethod=LPMethod::RevisedSimplex;for(int i=3;i+1<argc;++i){if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="qp")qp=true;if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="lp-relaxation")relax=true;if(std::string(argv[i])=="--lp-method"){std::string z=argv[i+1];if(z=="dual-simplex")lpMethod=LPMethod::DualSimplex;else if(z=="ipm")lpMethod=LPMethod::IPM;else if(z=="pdhg")lpMethod=LPMethod::PDHG;}}

@@ -37,6 +37,11 @@ INTEGER_FIELDS = {
     "standardized_columns": "Standardized columns",
     "standardized_nonzeros": "Standardized nonzeros",
     "iterations": "Iterations",
+    "attempt_count": "Attempt count",
+}
+TEXT_FIELDS = {
+    "presolve_termination": "Presolve termination",
+    "fallback_reason": "Fallback reason",
 }
 
 
@@ -46,11 +51,13 @@ def field(output: str, label: str) -> str | None:
 
 
 def run_once(solver: Path, instance: Path, method: str, presolve: bool,
-             limit: int, timeout: float) -> dict:
+             limit: int, timeout: float, presolve_time_ms: float = 0.0) -> dict:
     command = [str(solver), "--input", str(instance), "--method", method,
                "--max-iterations", str(limit)]
     if not presolve:
         command.append("--no-presolve")
+    elif presolve_time_ms > 0:
+        command.extend(["--presolve-time-ms", str(presolve_time_ms)])
     start = time.perf_counter_ns()
     try:
         proc = subprocess.run(command, capture_output=True, text=True,
@@ -58,6 +65,8 @@ def run_once(solver: Path, instance: Path, method: str, presolve: bool,
         output = proc.stdout + "\n" + proc.stderr
         record = {key: field(output, label) for key, label in TIMING_FIELDS.items()}
         record.update({key: field(output, label) for key, label in INTEGER_FIELDS.items()})
+        record.update({key: field(output, label) for key, label in TEXT_FIELDS.items()})
+        record["presolve_time_budget_ms"] = field(output, "Presolve time budget ms")
         record.update({
             "status": field(output, "Status"),
             "objective": field(output, "Objective"),
@@ -106,6 +115,8 @@ def main() -> int:
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=500)
     parser.add_argument("--timeout", type=float, default=8.0)
+    parser.add_argument("--presolve-time-ms", type=float, default=0.0,
+                        help="optional C++ presolve budget (0 leaves it unlimited)")
     parser.add_argument("--output", type=Path, default=ROOT / "benchmarks/lp_audit_baseline.json")
     args = parser.parse_args()
     methods = args.method or ["revised-simplex"]
@@ -130,7 +141,7 @@ def main() -> int:
             for method in methods:
                 for presolve in presolve_modes:
                     samples = [run_once(solver, instance, method, presolve,
-                                        args.max_iterations, args.timeout)
+                                        args.max_iterations, args.timeout, args.presolve_time_ms)
                               for _ in range(args.repetitions)]
                     key = f"{label}/{instance_name}/{method}/presolve_{'on' if presolve else 'off'}"
                     results[key] = aggregate(samples)

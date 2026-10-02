@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FAKE_OUTPUT = """MODEL fixture
 Backend: CPU
 Presolve: ON
+Presolve time budget ms: 500
+Presolve termination: diminishing_returns
 Parse time ms: 0.1
 Presolve time ms: 0.0
 Presolve pass: 1 time_ms=0.2 variables=3->2 constraints=2->1 nnz=4->2 bound_tightenings=1 fixed_variables=1 substitutions=0 singleton_reductions=0 redundant_rows=1 reduction_percent=40.0
@@ -47,6 +49,8 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(passes[0]["fixed_variables"], 1)
         self.assertEqual(benchmark._first_number(benchmark._field(FAKE_OUTPUT, "Standardization time ms")), 0.3)
         self.assertEqual(benchmark._int(benchmark._field(FAKE_OUTPUT, "Standardized nonzeros")), 2)
+        self.assertEqual(benchmark._field(FAKE_OUTPUT, "Presolve termination"), "diminishing_returns")
+        self.assertEqual(benchmark._first_number(benchmark._field(FAKE_OUTPUT, "Presolve time budget ms")), 500.0)
 
     def test_netlib_mps_fixture_loads_as_lp(self):
         model = parse_problem_file(str(ROOT / "examples" / "afiro.mps"))
