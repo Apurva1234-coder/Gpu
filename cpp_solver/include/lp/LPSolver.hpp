@@ -169,13 +169,19 @@ public:
                 transformedVariables+=std::isfinite(v.lower)?1:2;
                 if(std::isfinite(v.upper)) ++standardizedRows;
             }
+            std::size_t constraintNonzeros=0;
             for(const auto& c:m.constraints) if(c.active)
-                standardizedRows+=c.relation==Relation::Equal?2:1;
+                { standardizedRows+=c.relation==Relation::Equal?2:1; constraintNonzeros+=c.coefficients.size(); }
             // Retain the stable tableau implementation for moderate models;
-            // use sparse revised simplex when tableau storage would be large.
+            // use sparse revised simplex for large, very sparse models where
+            // dense tableau updates waste work on structural zeros.
             const long double estimatedEntries=static_cast<long double>(standardizedRows)*
                 (transformedVariables+2*standardizedRows+2);
-            if(estimatedEntries>8.0e6L) return solveSparse(m,method,limit);
+            const long double matrixCells=static_cast<long double>(standardizedRows)*transformedVariables;
+            const long double density=matrixCells>0?constraintNonzeros/matrixCells:1.0L;
+            if(estimatedEntries>8.0e6L || (estimatedEntries>1.0e6L && density<0.0045L) ||
+               (estimatedEntries>1.0e5L && density<0.03L && m.variables.size()<=m.constraints.size()))
+                return solveSparse(m,method,limit);
         }
         StandardLP s=standardize(m,tol_,integralityModel!=nullptr); const std::size_t n=s.c.size(), R=s.A.size();
         if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
@@ -186,6 +192,7 @@ public:
         std::vector<std::vector<double>> standardMatrix(R,std::vector<double>(total,0.0));
         std::vector<double> standardRhs(R,0.0);
         std::vector<std::size_t> basis(R); std::vector<bool> artificial(total,false);
+        std::vector<unsigned char> basic(total,0);
         std::size_t nextArtificial=originalAndSlack;
         for(std::size_t i=0;i<R;++i) {
             const double sign=needsArtificial[i]?-1.0:1.0;
@@ -193,8 +200,11 @@ public:
             tab[i][n+i]=standardMatrix[i][n+i]=sign;
             if(needsArtificial[i]) { tab[i][nextArtificial]=standardMatrix[i][nextArtificial]=1.0; basis[i]=nextArtificial; artificial[nextArtificial]=true; ++nextArtificial; }
             else basis[i]=n+i;
+            basic[basis[i]]=1;
             tab[i].back()=standardRhs[i]=sign*s.b[i];
         }
+        std::vector<std::size_t> pivotNonzeroColumns;
+        pivotNonzeroColumns.reserve(total+1);
         auto setObjective=[&](const std::vector<double>& cost) {
             std::fill(tab[R].begin(),tab[R].end(),0.0);
             for(std::size_t j=0;j<total;++j) tab[R][j]=-cost[j];
@@ -203,11 +213,10 @@ public:
         auto simplex=[&](const std::vector<double>& cost,std::size_t maxIterations,bool allowArtificial,std::size_t& iterations) {
             setObjective(cost);
             for(std::size_t it=0;it<maxIterations;++it) {
-                std::size_t enter=total; double mostNegative=-tol_.optimality;
+                std::size_t enter=total; double best=tol_.optimality;
                 for(std::size_t j=0;j<total;++j) {
-                    bool isBasic=false; for(std::size_t i=0;i<R;++i) if(basis[i]==j) { isBasic=true; break; }
-                    if(isBasic || (!allowArtificial&&artificial[j]) || tab[R][j]>=-tol_.optimality) continue;
-                    if(enter==total || tab[R][j]<mostNegative) { enter=j; mostNegative=tab[R][j]; }
+                    if(basic[j] || (!allowArtificial&&artificial[j]) || tab[R][j]>=-tol_.optimality) continue;
+                    if(-tab[R][j]>best) { enter=j; best=-tab[R][j]; }
                 }
                 if(enter==total) { iterations=it; return LPStatus::Optimal; }
                 double minimumRatio=std::numeric_limits<double>::infinity();
@@ -222,7 +231,7 @@ public:
                     if(ratio<=relaxed && tab[i][enter]>bestPivot) { leave=i; bestPivot=tab[i][enter]; }
                 }
                 if(leave==R) { iterations=it; return LPStatus::NumericalFailure; }
-                pivot(tab,leave,enter); basis[leave]=enter; iterations=it+1;
+                pivot(tab,leave,enter,pivotNonzeroColumns); basic[basis[leave]]=0; basis[leave]=enter; basic[enter]=1; iterations=it+1;
                 for(std::size_t i=0;i<R;++i) if(tab[i].back()<0 && tab[i].back()>-tol_.feasibility*10) tab[i].back()=0;
                 if(it+1==maxIterations) return LPStatus::IterationLimit;
             }
@@ -240,10 +249,9 @@ public:
         for(std::size_t i=0;i<R;++i) if(artificial[basis[i]]) {
             std::size_t replacement=originalAndSlack;
             for(std::size_t j=0;j<originalAndSlack;++j) {
-                bool isBasic=false; for(std::size_t k=0;k<R;++k) if(basis[k]==j) { isBasic=true; break; }
-                if(!isBasic && std::abs(tab[i][j])>tol_.pivot) { replacement=j; break; }
+                if(!basic[j] && std::abs(tab[i][j])>tol_.pivot) { replacement=j; break; }
             }
-            if(replacement<originalAndSlack) { pivot(tab,i,replacement); basis[i]=replacement; }
+            if(replacement<originalAndSlack) { pivot(tab,i,replacement,pivotNonzeroColumns); basic[basis[i]]=0; basis[i]=replacement; basic[replacement]=1; }
         }
         std::vector<double> phaseTwo(total,0.0); for(std::size_t j=0;j<n;++j) phaseTwo[j]=s.c[j];
         std::size_t phaseTwoIterations=0; out.status=simplex(phaseTwo,limit,false,phaseTwoIterations); out.iterations+=phaseTwoIterations;
@@ -257,7 +265,7 @@ public:
         if(!std::isfinite(out.objectiveValue)||verifyScaledResidual(m,out.solution.primal)>std::max(100.0*tol_.feasibility,1e-7)) {
             out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return out;
         }
-        out.basisVariables=basis;for(size_t i=0;i<R;++i)out.basisRows.emplace_back(tab[i].begin(),tab[i].end());for(size_t i=0;i<R;++i){size_t bv=basis[i];if(bv>=n||bv>=s.map.size())continue;size_t original=s.map[bv].first;const Model& im=integralityModel?*integralityModel:m;if(original>=im.variables.size()||(im.variables[original].type!=VariableType::Integer&&im.variables[original].type!=VariableType::Binary))continue;double rhs=tab[i].back(),fr=rhs-std::floor(rhs);if(fr<=tol_.feasibility||fr>=1-tol_.feasibility)continue;std::vector<double> fc(n);double cutRhs=fr;bool valid=true;for(size_t j=0;j<n+R;++j){bool basic=false;for(size_t k=0;k<R;++k)if(basis[k]==j)basic=true;if(basic)continue;double f=tab[i][j]-std::floor(tab[i][j]);if(f<tol_.zero||1-f<tol_.zero)f=0;if(std::abs(f)<=tol_.feasibility)continue;if(j<n)fc[j]+=f;else{size_t row=j-n;if(row>=s.A.size()||std::abs(s.b[row]-std::round(s.b[row]))>tol_.feasibility){valid=false;break;}for(size_t k=0;k<n;++k)if(std::abs(s.A[row][k])>tol_.feasibility){size_t id=s.map[k].first;if(id>=im.variables.size()||im.variables[id].type==VariableType::Continuous||std::abs(s.A[row][k]-std::round(s.A[row][k]))>tol_.feasibility){valid=false;break;}fc[k]-=f*s.A[row][k];}cutRhs-=f*s.b[row];}}
+        out.basisVariables=basis;for(size_t i=0;i<R;++i)out.basisRows.emplace_back(tab[i].begin(),tab[i].end());for(size_t i=0;i<R;++i){size_t bv=basis[i];if(bv>=n||bv>=s.map.size())continue;size_t original=s.map[bv].first;const Model& im=integralityModel?*integralityModel:m;if(original>=im.variables.size()||(im.variables[original].type!=VariableType::Integer&&im.variables[original].type!=VariableType::Binary))continue;double rhs=tab[i].back(),fr=rhs-std::floor(rhs);if(fr<=tol_.feasibility||fr>=1-tol_.feasibility)continue;std::vector<double> fc(n);double cutRhs=fr;bool valid=true;for(size_t j=0;j<n+R;++j){if(basic[j])continue;double f=tab[i][j]-std::floor(tab[i][j]);if(f<tol_.zero||1-f<tol_.zero)f=0;if(std::abs(f)<=tol_.feasibility)continue;if(j<n)fc[j]+=f;else{size_t row=j-n;if(row>=s.A.size()||std::abs(s.b[row]-std::round(s.b[row]))>tol_.feasibility){valid=false;break;}for(size_t k=0;k<n;++k)if(std::abs(s.A[row][k])>tol_.feasibility){size_t id=s.map[k].first;if(id>=im.variables.size()||im.variables[id].type==VariableType::Continuous||std::abs(s.A[row][k]-std::round(s.A[row][k]))>tol_.feasibility){valid=false;break;}fc[k]-=f*s.A[row][k];}cutRhs-=f*s.b[row];}}
           if(!valid)continue;GomoryRow gr;gr.sourceVariable=original;gr.coefficients.assign(m.variables.size(),0);double lhs=0;for(size_t j=0;j<n;++j)if(std::abs(fc[j])>tol_.zero){size_t id=s.map[j].first;double scale=s.map[j].second;if(std::abs(scale-1)>tol_.feasibility){valid=false;break;}gr.coefficients[id]+=fc[j];double shift=std::isfinite(m.variables[id].lower)?m.variables[id].lower:0;cutRhs+=fc[j]*shift;lhs+=fc[j]*(out.solution.primal[id]-shift);}if(!valid)continue;gr.rhs=cutRhs;gr.violation=gr.rhs-lhs;if(gr.violation>tol_.feasibility)out.gomoryRows.push_back(std::move(gr));}
         if(out.status==LPStatus::NumericalFailure)out.status=LPStatus::IterationLimit;return out;
     }
@@ -317,11 +325,11 @@ private:
             for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:rows[i])if(item.first>i)x[i]-=item.second*x[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;x[i]/=d->second;if(!std::isfinite(x[i]))return false;}
             return true;
         }
-        bool solveTranspose(const std::vector<double>& b,std::vector<double>& x) const {
-            if(b.size()!=size)return false;std::vector<double> z=b;
-            for(std::size_t i=0;i<size;++i){for(const auto& item:upperColumns[i])z[i]-=item.second*z[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;z[i]/=d->second;}
-            for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:lowerColumns[i])z[i]-=item.second*z[item.first];}
-            x.assign(size,0.0);for(std::size_t i=0;i<size;++i)x[permutation[i]]=z[i];
+        bool solveTranspose(const std::vector<double>& b,std::vector<double>& x,std::vector<double>& work) const {
+            if(b.size()!=size)return false;work.assign(b.begin(),b.end());
+            for(std::size_t i=0;i<size;++i){for(const auto& item:upperColumns[i])work[i]-=item.second*work[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;work[i]/=d->second;}
+            for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:lowerColumns[i])work[i]-=item.second*work[item.first];}
+            x.resize(size);std::fill(x.begin(),x.end(),0.0);for(std::size_t i=0;i<size;++i)x[permutation[i]]=work[i];
             return std::all_of(x.begin(),x.end(),[](double v){return std::isfinite(v);});
         }
     };
@@ -351,7 +359,15 @@ private:
             else basis[i]=slackStart+i;
             basic[basis[i]]=true;
         }
-        SparseLU factorization; std::vector<EtaUpdate> updates; std::string factorFailure;
+        std::vector<double> devexWeights(total,1.0), devexResetWeights(total,1.0);
+        for(std::size_t j=0;j<total;++j) {
+            long double columnNormSquared=0.0L;
+            for(const auto& entry:columns[j]) columnNormSquared+=static_cast<long double>(entry.second)*entry.second;
+            devexWeights[j]=devexResetWeights[j]=std::max(1e-12,static_cast<double>(columnNormSquared));
+        }
+        std::size_t devexUpdatesSinceReset=0;
+        constexpr std::size_t sparseRefactorInterval=15;
+        SparseLU factorization; std::vector<EtaUpdate> updates; updates.reserve(sparseRefactorInterval); std::string factorFailure;
         auto refactorBasis=[&]()->bool {
             std::vector<std::unordered_map<std::size_t,double>> matrix(R);
             for(std::size_t j=0;j<R;++j) for(const auto& item:columns[basis[j]]) matrix[item.first][j]=item.second;
@@ -371,34 +387,37 @@ private:
             }
             return true;
         };
-        auto solveCurrentTranspose=[&](const std::vector<double>& v,std::vector<double>& result)->bool {
-            std::vector<double> transformed=v;
+        std::vector<double> transposeWork(R);
+        auto solveCurrentTranspose=[&](std::vector<double>& transformed,std::vector<double>& result)->bool {
             for(std::size_t u=updates.size();u>0;--u) {
                 const auto& eta=updates[u-1]; const std::size_t r=eta.row;
                 double other=0.0;for(std::size_t i=0;i<R;++i)if(i!=r)other+=eta.direction[i]*transformed[i];
                 const double p=eta.direction[r];if(std::abs(p)<=tol_.pivot)return false;
                 transformed[r]=(transformed[r]-other)/p;
             }
-            return factorization.solveTranspose(transformed,result);
+            return factorization.solveTranspose(transformed,result,transposeWork);
         };
         if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="initial sparse basis factorization failed";return out;}
         std::string simplexFailure;
+        std::vector<double> cb(R,0.0), y(R,0.0), enteringColumn(R,0.0), direction(R,0.0);
+        std::vector<double> devexUnit(R,0.0), devexRow(R,0.0);
         auto simplex=[&](bool phaseOne,std::size_t maxIterations,std::size_t& iterations)->LPStatus {
             for(std::size_t it=0;it<maxIterations;++it) {
-                std::vector<double> cb(R,0.0),y;
+                std::fill(cb.begin(),cb.end(),0.0);
                 for(std::size_t i=0;i<R;++i) cb[i]=phaseOne?(artificial[basis[i]]?-1.0:0.0):(basis[i]<n?s.c[basis[i]]:0.0);
                 if(!solveCurrentTranspose(cb,y)) {iterations=it;simplexFailure="sparse dual basis solve failed";return LPStatus::NumericalFailure;}
-                std::size_t enter=total; double mostPositive=tol_.optimality, enterReduced=0.0;
+                std::size_t enter=total; double mostPositive=0.0;
                 for(std::size_t j=0;j<total;++j) {
                     if(basic[j] || artificial[j]) continue;
                     double reduced=phaseOne?0.0:(j<n?s.c[j]:0.0);
                     for(const auto& e:columns[j]) reduced-=e.second*y[e.first];
                     if(reduced>tol_.optimality) {
-                        if(reduced>mostPositive) { mostPositive=reduced; enter=j; enterReduced=reduced; }
+                        const double score=reduced/std::sqrt(devexWeights[j]);
+                        if(score>mostPositive) { mostPositive=score; enter=j; }
                     }
                 }
                 if(enter==total) { iterations=it; return LPStatus::Optimal; }
-                std::vector<double> enteringColumn(R,0.0),direction;
+                std::fill(enteringColumn.begin(),enteringColumn.end(),0.0);
                 for(const auto& e:columns[enter]) enteringColumn[e.first]=e.second;
                 if(!solveCurrent(enteringColumn,direction)) {iterations=it;simplexFailure="sparse primal basis solve failed";return LPStatus::NumericalFailure;}
                 const double stablePivot=std::max(tol_.pivot,1e-8);
@@ -416,7 +435,7 @@ private:
                         else if(ratio==minRatio) {
                             // Lexicographic ratio tie-break prevents degenerate
                             // phase-I pivots from revisiting the same basis.
-                            std::vector<double> unit(R,0.0), candidateLex; unit[i]=1.0;
+                            std::vector<double> unit(R,0.0), candidateLex(R); unit[i]=1.0;
                             if(!solveCurrentTranspose(unit,candidateLex)){iterations=it;simplexFailure="sparse lexicographic ratio solve failed";return LPStatus::NumericalFailure;}
                             if(leaveLex.empty()) {std::vector<double> leavingUnit(R,0.0);leavingUnit[leave]=1.0;if(!solveCurrentTranspose(leavingUnit,leaveLex)){iterations=it;simplexFailure="sparse lexicographic tie solve failed";return LPStatus::NumericalFailure;}}
                             for(std::size_t k=0;k<R;++k) {
@@ -431,6 +450,24 @@ private:
                 if(leave==R) { iterations=it; return LPStatus::NumericalFailure; }
                 const double pivotValue=direction[leave];
                 const double theta=std::max(0.0,xB[leave])/pivotValue;
+                std::fill(devexUnit.begin(),devexUnit.end(),0.0); devexUnit[leave]=1.0;
+                if(!solveCurrentTranspose(devexUnit,devexRow)) {iterations=it;simplexFailure="sparse Devex row solve failed";return LPStatus::NumericalFailure;}
+                long double directionNormSquared=0.0L;
+                for(double value:direction) directionNormSquared+=static_cast<long double>(value)*value;
+                const double pivotSquared=pivotValue*pivotValue;
+                const double leavingNormSquared=(1.0+static_cast<double>(directionNormSquared))/pivotSquared;
+                for(std::size_t j=0;j<total;++j) if(!basic[j] && j!=enter) {
+                    if(artificial[j])continue;
+                    double rowCoefficient=0.0;
+                    for(const auto& entry:columns[j]) rowCoefficient+=entry.second*devexRow[entry.first];
+                    const double approximateNorm=rowCoefficient*rowCoefficient*leavingNormSquared;
+                    if(std::isfinite(approximateNorm)) devexWeights[j]=std::max(devexWeights[j],approximateNorm);
+                }
+                devexWeights[basis[leave]]=leavingNormSquared;
+                if(++devexUpdatesSinceReset>=150) {
+                    devexWeights=devexResetWeights;
+                    devexUpdatesSinceReset=0;
+                }
                 updates.push_back({leave,direction});
                 for(std::size_t i=0;i<R;++i) if(i!=leave) {
                     const double q=direction[i];
@@ -440,7 +477,7 @@ private:
                 xB[leave]=theta;
                 basic[basis[leave]]=false; basis[leave]=enter; basic[enter]=true;
                 iterations=it+1;
-                if((it+1)%50==0 && !refactorBasis()) {iterations=it+1;simplexFailure=factorFailure;return LPStatus::NumericalFailure;}
+                if((it+1)%sparseRefactorInterval==0 && !refactorBasis()) {iterations=it+1;simplexFailure=factorFailure;return LPStatus::NumericalFailure;}
                 if(it+1==maxIterations) return LPStatus::IterationLimit;
             }
             return LPStatus::IterationLimit;
@@ -448,6 +485,7 @@ private:
         std::size_t phaseOneIterations=0;
         LPStatus status=simplex(true,limit,phaseOneIterations); out.iterations=phaseOneIterations;
         if(status==LPStatus::IterationLimit) { out.status=status; out.message="phase-I iteration limit"; return out; }
+        if(status==LPStatus::Unbounded) { out.status=LPStatus::NumericalFailure; out.message="phase-I auxiliary objective was incorrectly reported unbounded"; return out; }
         if(status!=LPStatus::Optimal) { out.status=status; out.message=simplexFailure.empty()?"phase I did not find a feasible basis":simplexFailure; return out; }
         double artificialSum=0.0;
         for(std::size_t i=0;i<R;++i) if(artificial[basis[i]]) artificialSum+=std::max(0.0,xB[i]);
@@ -463,9 +501,7 @@ private:
                 if(!solveCurrent(enteringColumn,direction))continue;
                 if(std::abs(direction[row])>best){best=std::abs(direction[row]);replacement=j;}
             }
-            if(replacement<total) {
-                basic[basis[row]]=false; basis[row]=replacement; basic[replacement]=true;
-            }
+            if(replacement<artificialStart) { basic[basis[row]]=false; basis[row]=replacement; basic[replacement]=true; }
         }
         if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="sparse basis factorization failed after phase I";return out;}
         std::size_t phaseTwoIterations=0; out.status=simplex(false,limit,phaseTwoIterations); out.iterations+=phaseTwoIterations;
@@ -483,7 +519,13 @@ private:
         out.basisVariables=basis;
         return out;
     }
-    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c){double q=t[r][c];t[r]=nla::VectorOps::scale(t[r],1.0/q);for(size_t i=0;i<t.size();++i)if(i!=r){q=t[i][c];nla::VectorOps::axpy(-q,t[r],t[i]);}}
+    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c,std::vector<std::size_t>&nonzeroColumns){
+        auto& pivotRow=t[r];const double inverse=1.0/pivotRow[c];
+        for(double& value:pivotRow)value*=inverse;
+        nonzeroColumns.clear();
+        for(size_t j=0;j<pivotRow.size();++j)if(pivotRow[j]!=0.0)nonzeroColumns.push_back(j);
+        for(size_t i=0;i<t.size();++i)if(i!=r){auto& row=t[i];const double factor=row[c];if(factor==0.0)continue;for(const size_t j:nonzeroColumns)row[j]-=factor*pivotRow[j];row[c]=0.0;}
+    }
     static double verifyResidual(const Model&m,const std::vector<double>&x){double r=0;for(auto&c:m.constraints){if(!c.active)continue;double a=0;for(auto p:c.coefficients)a+=p.second*x[p.first];r=std::max(r,c.relation==Relation::Equal?std::abs(a-c.rhs):c.relation==Relation::LessEqual?std::max(0.,a-c.rhs):std::max(0.,c.rhs-a));}return r;}
     static double verifyScaledResidual(const Model&m,const std::vector<double>&x){
         if(x.size()!=m.variables.size())return std::numeric_limits<double>::infinity();double worst=0;

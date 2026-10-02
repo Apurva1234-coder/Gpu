@@ -153,7 +153,7 @@ def verify_original(model, primal: list[float] | None, tolerance: float = 1e-7,
 def _method_for(problem_class: str, method: str) -> tuple[list[str], str]:
     if method == "auto":
         method = {"LP": "revised-simplex", "MILP": "milp", "QP": "qp"}.get(problem_class, "auto")
-    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm", "pdhg"}:
+    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm"}:
         return ["--method", "milp", "--lp-method", method], "branch-and-bound/" + method
     return ["--method", method], method
 
@@ -506,12 +506,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg"}:
+            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not an LP method"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
+            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not supported for MILP"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
@@ -566,11 +566,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 external_rows.append(reference)
                 row["reference_solver_status"] = reference.get("reference_solver_status")
             if args.compare_backends:
-                gpu_supported = classification == "QP" or (classification == "LP" and args.method in {"ipm", "pdhg"})
+                gpu_supported = classification == "QP" or (classification == "LP" and args.method == "ipm")
                 pair = {"dataset": args.dataset, "instance": str(path), "supported": gpu_supported,
                         "gpu_available": gpu["available"], "gpu_device": gpu["device"], "gpu_used": False,
                         "status": "GPU_UNSUPPORTED" if not gpu_supported else "NOT_AVAILABLE" if not gpu["available"] else None,
-                        "gpu_reason": "CUDA kernels are supported for IPM/QP and PDHG LP only" if not gpu_supported else ""}
+                        "gpu_reason": "CUDA kernels are supported for IPM LP and QP only" if not gpu_supported else ""}
                 if gpu_supported and gpu["available"]:
                     cpu = _invoke(solver, path, method_args, "cpu", args.device, args.time_limit, no_presolve=args.no_presolve)
                     cuda = _invoke(solver, path, method_args, "cuda", args.device, args.time_limit, no_presolve=args.no_presolve)
@@ -701,7 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True, choices=("netlib", "miplib", "qplib", "mittelmann", "examples", "custom"))
     parser.add_argument("--input", required=True, help="Directory containing locally available instances")
     parser.add_argument("--solver", required=True, help="Path to sovereign_presolve_cli executable")
-    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
+    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
     parser.add_argument("--backend", default="cpu", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--tier", choices=("quick", "standard", "full"), default="quick")

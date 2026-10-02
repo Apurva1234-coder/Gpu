@@ -17,7 +17,7 @@ def parse_mps(text: str):
     for raw in lines[1:]:
         tokens = raw.split()
         head = tokens[0].upper()
-        if head in {"NAME", "ROWS", "COLUMNS", "RHS", "BOUNDS", "RANGES", "ENDATA", "OBJSENSE", "QSECTION"}:
+        if len(tokens) == 1 and head in {"NAME", "ROWS", "COLUMNS", "RHS", "BOUNDS", "RANGES", "ENDATA", "OBJSENSE", "QSECTION"}:
             section = head
             if head == "ENDATA":
                 break

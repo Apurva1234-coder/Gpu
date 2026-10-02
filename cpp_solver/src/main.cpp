@@ -49,10 +49,78 @@ static const char* buildType(){
 }
 int main(int argc,char** argv){
  if(argc>=2&&std::string(argv[1])=="--device-info"){int device=0;for(int i=2;i+1<argc;++i)if(std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);std::cout<<cuda::deviceInfoText(device);return 0;}
+ if(argc>=2&&std::string(argv[1])=="--select-backend"){
+  try{
+   cuda::Backend requested=cuda::Backend::Auto;
+   std::size_t rows=0,cols=0,nnz=0,repetitions=1;
+   int device=0;
+   std::string modelSize="UNKNOWN",algorithm="revised-simplex";
+   for(int i=2;i<argc;++i){
+    if(i+1<argc&&std::string(argv[i])=="--backend")requested=cuda::parseBackend(argv[i+1]);
+    if(i+1<argc&&std::string(argv[i])=="--model-size")modelSize=argv[i+1];
+    if(i+1<argc&&std::string(argv[i])=="--method")algorithm=argv[i+1];
+    if(i+1<argc&&std::string(argv[i])=="--rows")rows=std::stoull(argv[i+1]);
+    if(i+1<argc&&std::string(argv[i])=="--cols")cols=std::stoull(argv[i+1]);
+    if(i+1<argc&&std::string(argv[i])=="--nnz")nnz=std::stoull(argv[i+1]);
+    if(i+1<argc&&std::string(argv[i])=="--repetitions")repetitions=std::stoull(argv[i+1]);
+    if(i+1<argc&&std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);
+   }
+   constexpr bool measuredCudaSpeedup=false;
+   auto selected=cuda::chooseBackend(requested,rows,cols,nnz,repetitions,modelSize,algorithm,measuredCudaSpeedup);
+   cuda::Context gpu(device);
+   const bool fallback=selected==cuda::Backend::CUDA&&!gpu.available()&&requested==cuda::Backend::Auto;
+   if(fallback)selected=cuda::Backend::CPU;
+   const char* reason=requested!=cuda::Backend::Auto?"An explicit backend override was requested.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":algorithm!="ipm"&&algorithm!="qp"&&algorithm!="pdhg"?"The selected algorithm has no production CUDA execution path; CPU was selected.":fallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":selected==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
+   std::cout<<"Backend: "<<cuda::backendName(selected)<<"\nBackend reason: "<<reason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<algorithm<<"\nVariables: "<<cols<<"\nConstraints: "<<rows<<"\nNonzeros: "<<nnz<<"\n";
+   return 0;
+  }catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 2;}
+ }
  if(argc<3||std::string(argv[1])!="--input"){std::cerr<<"usage: --input <file> [--method revised-simplex|dual-simplex|ipm|pdhg|qp] [--max-iterations N (0 = unlimited)]\n";return 2;}
- try{std::size_t maxIterations=10000,maxNodes=10000;cuda::Backend requestedBackend=cuda::Backend::CPU;int device=0;bool iterative=false,presolveEnabled=true,sparsePrimal=false;for(int i=3;i<argc;++i){if(i+1<argc&&std::string(argv[i])=="--max-iterations"){maxIterations=std::stoull(argv[i+1]);if(maxIterations==0)maxIterations=std::numeric_limits<std::size_t>::max();}if(i+1<argc&&std::string(argv[i])=="--max-nodes")maxNodes=std::stoull(argv[i+1]);if(i+1<argc&&std::string(argv[i])=="--backend"){std::string b=argv[i+1];if(b!="cpu"&&b!="cuda"&&b!="auto")throw std::invalid_argument("--backend must be cpu, cuda, or auto");requestedBackend=cuda::parseBackend(b);}if(i+1<argc&&std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);if(i+1<argc&&((std::string(argv[i])=="--method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"||std::string(argv[i+1])=="qp"))||(std::string(argv[i])=="--lp-method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"))))iterative=true;if(std::string(argv[i])=="--no-presolve")presolveEnabled=false;if(std::string(argv[i])=="--sparse-primal")sparsePrimal=true;}auto parseStart=std::chrono::steady_clock::now();Model model=parseInput(argv[2]);double parseMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-parseStart).count();std::size_t nnz=0;for(const auto& c:model.constraints)nnz+=c.coefficients.size();auto selectedBackend=cuda::chooseBackend(requestedBackend,model.constraints.size(),model.variables.size(),nnz,iterative?8:1);cuda::Context gpu(device);if(selectedBackend==cuda::Backend::CUDA&&!gpu.available())throw std::runtime_error("CUDA backend requested but no usable CUDA device is available");if(gpu.available()&&selectedBackend==cuda::Backend::CUDA)cuda::Context::setDefault(&gpu);auto cls=classify(model);auto presolveStart=std::chrono::steady_clock::now();auto red=presolveEnabled?Presolver{}.run(model):PresolveResult{model};double presolveMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presolveStart).count();LPMethod method=LPMethod::RevisedSimplex;
+ try {
+  std::size_t maxIterations=10000,maxNodes=10000;
+  cuda::Backend requestedBackend=cuda::Backend::CPU;
+  int device=0;
+  bool iterative=false,presolveEnabled=true,sparsePrimal=false,selectBackendOnly=false;
+  std::string modelSize="UNKNOWN",selectedAlgorithm="revised-simplex";
+  for(int i=3;i<argc;++i){
+   if(i+1<argc&&std::string(argv[i])=="--max-iterations"){maxIterations=std::stoull(argv[i+1]);if(maxIterations==0)maxIterations=std::numeric_limits<std::size_t>::max();}
+   if(i+1<argc&&std::string(argv[i])=="--max-nodes")maxNodes=std::stoull(argv[i+1]);
+   if(i+1<argc&&std::string(argv[i])=="--backend"){std::string b=argv[i+1];if(b!="cpu"&&b!="cuda"&&b!="auto")throw std::invalid_argument("--backend must be cpu, cuda, or auto");requestedBackend=cuda::parseBackend(b);}
+   if(i+1<argc&&std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);
+   if(i+1<argc&&std::string(argv[i])=="--model-size")modelSize=argv[i+1];
+   if(i+1<argc&&std::string(argv[i])=="--method")selectedAlgorithm=argv[i+1];
+   if(std::string(argv[i])=="--select-backend")selectBackendOnly=true;
+   if(i+1<argc&&((std::string(argv[i])=="--method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"||std::string(argv[i+1])=="qp"))||(std::string(argv[i])=="--lp-method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"))))iterative=true;
+   if(std::string(argv[i])=="--no-presolve")presolveEnabled=false;
+   if(std::string(argv[i])=="--sparse-primal")sparsePrimal=true;
+  }
+  auto parseStart=std::chrono::steady_clock::now();
+  Model model=parseInput(argv[2]);
+  double parseMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-parseStart).count();
+  std::size_t nnz=0;for(const auto& c:model.constraints)nnz+=c.coefficients.size();
+  // No checked-in record currently demonstrates a verified same-model
+  // speedup for a production CUDA method. Keep AUTO on CPU until that evidence
+  // exists; the experimental kernels and the lower-level size heuristic stay
+  // available for internal testing.
+  constexpr bool measuredCudaSpeedup=false;
+  const auto policyBackend=cuda::chooseBackend(requestedBackend,model.constraints.size(),model.variables.size(),nnz,iterative?8:1,modelSize,selectedAlgorithm,measuredCudaSpeedup);
+  cuda::Context gpu(device);
+  auto selectedBackend=policyBackend;
+  const bool cudaFallback=policyBackend==cuda::Backend::CUDA&&!gpu.available()&&requestedBackend==cuda::Backend::Auto;
+  if(policyBackend==cuda::Backend::CUDA&&!gpu.available()){
+   if(requestedBackend==cuda::Backend::Auto)selectedBackend=cuda::Backend::CPU;
+   else throw std::runtime_error("CUDA backend requested but no usable CUDA device is available");
+  }
+  const char* backendReason=requestedBackend!=cuda::Backend::Auto?"An explicit backend override was requested.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":!iterative?"The selected algorithm has no production CUDA execution path; CPU was selected.":cudaFallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":policyBackend==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
+  if(selectBackendOnly){std::cout<<"Backend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\n";return 0;}
+  if(gpu.available()&&selectedBackend==cuda::Backend::CUDA)cuda::Context::setDefault(&gpu);
+  auto cls=classify(model);
+  auto presolveStart=std::chrono::steady_clock::now();
+  auto red=presolveEnabled?Presolver{}.run(model):PresolveResult{model};
+  double presolveMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presolveStart).count();
+  LPMethod method=LPMethod::RevisedSimplex;
   for(int i=3;i+1<argc;++i)if(std::string(argv[i])=="--method"){std::string x=argv[i+1];if(x=="dual-simplex")method=LPMethod::DualSimplex;else if(x=="ipm")method=LPMethod::IPM;else if(x=="pdhg")method=LPMethod::PDHG;}
-  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nC++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nPRESOLVE\nFinal variables: "<<red.model.variables.size()<<"\nFinal constraints: "<<red.model.constraints.size()<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
+  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nResolved algorithm: "<<selectedAlgorithm<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nC++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nPRESOLVE\nFinal variables: "<<red.model.variables.size()<<"\nFinal constraints: "<<red.model.constraints.size()<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
   std::cout<<std::flush;
   bool qp=false,relax=false;LPMethod lpMethod=LPMethod::RevisedSimplex;for(int i=3;i+1<argc;++i){if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="qp")qp=true;if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="lp-relaxation")relax=true;if(std::string(argv[i])=="--lp-method"){std::string z=argv[i+1];if(z=="dual-simplex")lpMethod=LPMethod::DualSimplex;else if(z=="ipm")lpMethod=LPMethod::IPM;else if(z=="pdhg")lpMethod=LPMethod::PDHG;}}
   bool milp=false,cutting=false,fp=false;for(int i=3;i+1<argc;++i){if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="milp")milp=true;if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="cutting-plane")cutting=true;if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="feasibility-pump")fp=true;}

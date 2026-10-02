@@ -2,6 +2,7 @@
 #include "core/numerical/SparseMatrix.hpp"
 #include "core/numerical/DenseMatrix.hpp"
 #include "cuda/CudaError.hpp"
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -45,5 +46,21 @@ private:
 inline Backend chooseBackend(Backend requested, std::size_t rows, std::size_t cols, std::size_t nnz, std::size_t repetitions=1) {
   if (requested!=Backend::Auto) return requested;
   return repetitions>=8 && (rows>=512 || cols>=512 || nnz>=4096) ? Backend::CUDA : Backend::CPU;
+}
+
+// Production auto-routing is deliberately stricter than the experimental
+// work-size heuristic above. Only LARGE models and algorithms with real CUDA
+// kernels are eligible, and a measured same-method speedup is required before
+// AUTO selects CUDA. The current checked-in benchmark set has no verified
+// CPU/CUDA pairs, so callers pass measuredSpeedup=false for now.
+inline Backend chooseBackend(Backend requested, std::size_t rows, std::size_t cols,
+    std::size_t nnz, std::size_t repetitions, const std::string& modelSize,
+    const std::string& algorithm, bool measuredSpeedup) {
+  const bool cudaCompatible = algorithm=="ipm" || algorithm=="qp" || algorithm=="pdhg";
+  if (requested==Backend::CUDA && !cudaCompatible)
+    throw std::invalid_argument("CUDA execution is not implemented for algorithm: "+algorithm);
+  if (requested!=Backend::Auto) return requested;
+  if (modelSize!="LARGE" || !cudaCompatible || !measuredSpeedup) return Backend::CPU;
+  return chooseBackend(requested, rows, cols, nnz, repetitions);
 }
 }

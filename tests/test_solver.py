@@ -108,6 +108,19 @@ ENDATA
         self.assertEqual(classify_model(model).problem_type, "LP")
         self.assertEqual(model.constraints[0].operator, "<=")
 
+    def test_mps_default_rhs_set_name_is_not_treated_as_a_section_header(self):
+        model = self._parse_mps("""NAME TESTRHS
+ROWS
+ N COST
+ L LIMIT
+COLUMNS
+ X COST 1 LIMIT 1
+RHS
+ RHS LIMIT 7
+ENDATA
+""")
+        self.assertEqual(model.constraints[0].rhs, 7.0)
+
     def test_mps_integer_marker_is_milp(self):
         model = self._parse_mps("""NAME TESTMILP
 ROWS
