@@ -2,6 +2,7 @@
 #include "lp/LPSolver.hpp"
 #include "core/LinearSystem.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -49,7 +50,7 @@ public:
     explicit DualSimplex(Tolerance t={}):tol_(t){}
     LPResult solve(const Model& m,std::size_t limit=10000) const {
         LPResult out;out.method="dual-simplex";for(const auto&v:m.variables)if(v.type!=VariableType::Continuous){out.status=LPStatus::Unsupported;return out;}if(!m.quadratic.empty()){out.status=LPStatus::Unsupported;return out;}
-        StandardLP s=standardize(m,tol_);const std::size_t n=s.c.size(),rows=s.A.size();State q;q.b=s.b;q.c.assign(n+rows,0);q.A.assign(rows,std::vector<double>(n+rows,0));for(std::size_t i=0;i<rows;++i){for(std::size_t j=0;j<n;++j)q.A[i][j]=s.A[i][j];q.A[i][n+i]=1;}for(std::size_t j=0;j<n;++j)q.c[j]=s.c[j];q.basis.resize(rows);std::iota(q.basis.begin(),q.basis.end(),n);
+        const auto standardizationStart=std::chrono::steady_clock::now();StandardLP s=standardize(m,tol_);out.standardizedRows=s.A.size();out.standardizedColumns=s.c.size();for(const auto& row:s.A)for(double value:row)if(value!=0.0)++out.standardizedNonzeros;out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();const std::size_t n=s.c.size(),rows=s.A.size();State q;q.b=s.b;q.c.assign(n+rows,0);q.A.assign(rows,std::vector<double>(n+rows,0));for(std::size_t i=0;i<rows;++i){for(std::size_t j=0;j<n;++j)q.A[i][j]=s.A[i][j];q.A[i][n+i]=1;}for(std::size_t j=0;j<n;++j)q.c[j]=s.c[j];q.basis.resize(rows);std::iota(q.basis.begin(),q.basis.end(),n);
         if(!repairDualBasis(q,limit)){out.status=LPStatus::NumericalFailure;return out;}if(!refresh(q)||!dualFeasible(q)){out.status=LPStatus::NumericalFailure;return out;}
         for(std::size_t it=0;it<limit;++it){std::size_t leave=rows;double most=-tol_.feasibility;for(std::size_t i=0;i<rows;++i)if(q.xB[i]<most){most=q.xB[i];leave=i;}if(leave==rows){out.status=LPStatus::Optimal;out.iterations=it;break;}std::size_t enter=n+rows;double best=std::numeric_limits<double>::infinity();std::vector<double> row(rows);for(std::size_t j:q.nonbasis){std::vector<double> col(rows);for(std::size_t i=0;i<rows;++i)col[i]=q.A[i][j];if(!LinearSystem::solve(q.B,col,row,tol_))continue;double d=row[leave];if(d>=-tol_.pivot)continue;double ratio=(-q.reduced[j])/(-d);if(ratio<best){best=ratio;enter=j;}}
             if(enter==n+rows){out.status=LPStatus::Infeasible;out.iterations=it;return out;}q.basis[leave]=enter;if(!refresh(q)||!dualFeasible(q)){out.status=LPStatus::NumericalFailure;out.iterations=it+1;return out;}out.iterations=it+1;}

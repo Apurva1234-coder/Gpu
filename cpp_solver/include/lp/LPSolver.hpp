@@ -6,6 +6,7 @@
 #include "core/LinearSystem.hpp"
 #include "core/numerical/Vector.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -183,7 +184,12 @@ public:
                (estimatedEntries>1.0e5L && density<0.03L && m.variables.size()<=m.constraints.size()))
                 return solveSparse(m,method,limit);
         }
-        StandardLP s=standardize(m,tol_,integralityModel!=nullptr); const std::size_t n=s.c.size(), R=s.A.size();
+        const auto standardizationStart=std::chrono::steady_clock::now();
+        StandardLP s=standardize(m,tol_,integralityModel!=nullptr);
+        out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();
+        for(const auto& row:s.A)for(double value:row)if(value!=0.0)++out.standardizedNonzeros;
+        out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
+        const std::size_t n=s.c.size(), R=s.A.size();
         if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
         std::size_t artificialCount=0; std::vector<bool> needsArtificial(R,false);
         for(std::size_t i=0;i<R;++i) if(s.b[i]<-tol_.feasibility) { needsArtificial[i]=true; ++artificialCount; }
@@ -336,7 +342,11 @@ private:
     struct EtaUpdate { std::size_t row; std::vector<double> direction; };
     LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit) const {
         LPResult out; out.method=methodName(method);
+        const auto standardizationStart=std::chrono::steady_clock::now();
         SparseStandardLP s=standardizeSparse(m,tol_);
+        out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();
+        for(const auto& row:s.A)out.standardizedNonzeros+=row.size();
+        out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
         const std::size_t n=s.c.size(), R=s.A.size();
         if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
         std::vector<bool> needsArtificial(R,false);

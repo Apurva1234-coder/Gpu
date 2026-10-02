@@ -2,6 +2,7 @@
 #include "lp/LPSolver.hpp"
 #include "core/LinearSystem.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 namespace sovereign {
 class MehrotraIPM {
@@ -13,7 +14,7 @@ public:
  explicit MehrotraIPM(Tolerance t={}):tol_(t){}
  LPResult solve(const Model&m,std::size_t limit=10000)const{
   LPResult o;o.method="ipm";for(const auto&v:m.variables)if(v.type!=VariableType::Continuous){o.status=LPStatus::Unsupported;return o;}if(!m.quadratic.empty()){o.status=LPStatus::Unsupported;return o;}
-  StandardLP s=standardize(m,tol_);size_t n0=s.c.size(),p=s.A.size();if(!n0){o.status=LPStatus::NumericalFailure;return o;}size_t n=n0+p;std::vector<std::vector<double>>A(p,std::vector<double>(n));for(size_t i=0;i<p;++i){for(size_t j=0;j<n0;++j)A[i][j]=s.A[i][j];A[i][n0+i]=1;}s.c.resize(n,0);
+  const auto standardizationStart=std::chrono::steady_clock::now();StandardLP s=standardize(m,tol_);o.standardizedRows=s.A.size();o.standardizedColumns=s.c.size();for(const auto& row:s.A)for(double value:row)if(value!=0.0)++o.standardizedNonzeros;o.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();size_t n0=s.c.size(),p=s.A.size();if(!n0){o.status=LPStatus::NumericalFailure;return o;}size_t n=n0+p;std::vector<std::vector<double>>A(p,std::vector<double>(n));for(size_t i=0;i<p;++i){for(size_t j=0;j<n0;++j)A[i][j]=s.A[i][j];A[i][n0+i]=1;}s.c.resize(n,0);
   // standardize() stores an equivalent MAX objective, while these Newton
   // equations use the minimization convention A^T y + z - c = 0.
   // Negate the standardized objective before forming the KKT residual.

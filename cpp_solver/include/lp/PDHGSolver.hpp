@@ -3,6 +3,7 @@
 #include "lp/LPSolver.hpp"
 #include "cuda/CudaBackend.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -30,8 +31,10 @@ public:
         if (limit == 0 || limit == std::numeric_limits<std::size_t>::max())
             limit = std::numeric_limits<std::size_t>::max();
 
+        const auto standardizationStart=std::chrono::steady_clock::now();
         const SparseStandardLP standard = standardizeSparse(model, tolerance_);
         const std::size_t rows = standard.A.size(), columns = standard.c.size();
+        result.standardizedRows=rows; result.standardizedColumns=columns;
         if (!columns) {
             result.status = LPStatus::NumericalFailure;
             result.message = "LP has no active transformed variables";
@@ -41,6 +44,8 @@ public:
         std::vector<nla::Triplet> entries;
         std::size_t nonzeros = 0;
         for (const auto& row : standard.A) nonzeros += row.size();
+        result.standardizedNonzeros=nonzeros;
+        result.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
         entries.reserve(nonzeros);
         std::vector<double> rowNorm(rows, 0.0), columnNorm(columns, 0.0);
         for (std::size_t i = 0; i < rows; ++i) {

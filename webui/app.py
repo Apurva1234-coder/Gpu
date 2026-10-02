@@ -499,6 +499,8 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
     timings = {
         "parse_time_ms": _capture(r"^Parse time ms:\s*([^\r\n]+)$", output, None, float),
         "presolve_time_ms": _capture(r"^Presolve time ms:\s*([^\r\n]+)$", output, None, float),
+        "standardization_time_ms": _capture(r"^Standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "solve_pipeline_time_ms": _capture(r"^Solve pipeline time ms:\s*([^\r\n]+)$", output, None, float),
         "solver_time_ms": _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None, float),
         "postsolve_time_ms": _capture(r"^Postsolve time ms:\s*([^\r\n]+)$", output, None, float),
         "verification_time_ms": _capture(r"^Verification time ms:\s*([^\r\n]+)$", output, None, float),
@@ -509,6 +511,7 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "parsing_ms": timings["parse_time_ms"],
         "model_preparation_ms": timings["model_preparation_time_ms"],
         "presolve_ms": timings["presolve_time_ms"],
+        "standardization_ms": timings["standardization_time_ms"],
         "solver_ms": timings["solver_time_ms"],
         "postsolve_ms": timings["postsolve_time_ms"],
         "verification_ms": timings["verification_time_ms"],
@@ -545,6 +548,11 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "after_variables": _capture(r"^Final variables:\s*(\d+)$", output, None, int),
         "after_constraints": _capture(r"^Final constraints:\s*(\d+)$", output, None, int),
         "reductions": _capture(r"^Presolve reductions:\s*(\d+)$", output, None, int),
+        "before_nonzeros": _capture(r"^Nonzeros:\s*(\d+)$", output, None, int),
+        "standardized_rows": _capture(r"^Standardized rows:\s*(\d+)$", output, None, int),
+        "standardized_columns": _capture(r"^Standardized columns:\s*(\d+)$", output, None, int),
+        "standardized_nonzeros": _capture(r"^Standardized nonzeros:\s*(\d+)$", output, None, int),
+        "pass_stats": [line for line in re.findall(r"(?im)^Presolve pass:\s*[^\r\n]+$", output)],
     }
     metrics = {
         "objective": _capture(r"^Objective:\s*([^\r\n]+)$", output, None, float),
@@ -615,6 +623,7 @@ def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | N
         "parsing_ms": timings.get("parse_time_ms"),
         "model_preparation_ms": timings.get("model_preparation_time_ms"),
         "presolve_ms": timings.get("presolve_time_ms"),
+        "standardization_ms": timings.get("standardization_time_ms"),
         "solver_ms": timings.get("solver_time_ms"),
         "postsolve_ms": timings.get("postsolve_time_ms"),
         "verification_ms": timings.get("verification_time_ms"),

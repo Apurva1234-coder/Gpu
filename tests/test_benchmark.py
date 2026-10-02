@@ -17,6 +17,13 @@ Backend: CPU
 Presolve: ON
 Parse time ms: 0.1
 Presolve time ms: 0.0
+Presolve pass: 1 time_ms=0.2 variables=3->2 constraints=2->1 nnz=4->2 bound_tightenings=1 fixed_variables=1 substitutions=0 singleton_reductions=0 redundant_rows=1 reduction_percent=40.0
+Standardization time ms: 0.3
+Solve pipeline time ms: 0.7
+Solve time ms: 0.4
+Standardized rows: 1
+Standardized columns: 2
+Standardized nonzeros: 2
 Final variables: 1
 Final constraints: 1
 Presolve reductions: 0
@@ -32,6 +39,15 @@ Primal: 15 17.5
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_presolve_pass_and_standardization_telemetry_is_parsed(self):
+        passes = benchmark._presolve_pass_stats(FAKE_OUTPUT)
+        self.assertEqual(len(passes), 1)
+        self.assertEqual(passes[0]["pass"], 1)
+        self.assertEqual(passes[0]["variables"], "3->2")
+        self.assertEqual(passes[0]["fixed_variables"], 1)
+        self.assertEqual(benchmark._first_number(benchmark._field(FAKE_OUTPUT, "Standardization time ms")), 0.3)
+        self.assertEqual(benchmark._int(benchmark._field(FAKE_OUTPUT, "Standardized nonzeros")), 2)
+
     def test_netlib_mps_fixture_loads_as_lp(self):
         model = parse_problem_file(str(ROOT / "examples" / "afiro.mps"))
         self.assertGreater(len(model.variables), 0)

@@ -34,7 +34,9 @@ CSV_FIELDS = [
     "presolve_enabled", "status", "objective_value", "best_primal_bound",
     "best_dual_bound", "absolute_gap", "relative_gap", "iterations", "lp_solves",
     "nodes_created", "nodes_processed", "nodes_pruned", "parse_time_ms", "model_preparation_time_ms",
-    "presolve_time_ms", "solve_time_ms", "postsolve_time_ms",
+    "presolve_time_ms", "standardization_time_ms", "solve_time_ms", "solve_pipeline_time_ms",
+    "standardized_rows", "standardized_columns", "standardized_nonzeros", "postsolve_time_ms",
+    "presolve_pass_stats",
     "verification_time_ms", "total_time_ms", "primal_residual", "dual_residual",
     "complementarity_residual", "integer_feasible", "verification_pass",
     "convexity", "hessian_type", "gpu_available", "gpu_device", "gpu_used",
@@ -58,6 +60,23 @@ def _float(text: str | None) -> float | None:
 def _field(output: str, label: str) -> str | None:
     match = re.search(rf"(?im)^\s*{re.escape(label)}\s*:\s*(.*?)\s*$", output)
     return match.group(1) if match else None
+
+
+def _presolve_pass_stats(output: str) -> list[dict[str, Any]]:
+    """Decode the C++ per-pass presolve profile emitted by the CLI."""
+    records: list[dict[str, Any]] = []
+    for match in re.finditer(r"(?im)^Presolve pass:\s*(\d+)\s+([^\r\n]+)$", output):
+        record: dict[str, Any] = {"pass": int(match.group(1))}
+        for key, value in re.findall(r"([a-z_]+)=([^\s]+)", match.group(2)):
+            if "->" in value:
+                record[key] = value
+                continue
+            try:
+                record[key] = float(value) if "." in value or "e" in value.lower() else int(value)
+            except ValueError:
+                continue
+        records.append(record)
+    return records
 
 
 def _vector(output: str) -> list[float] | None:
@@ -283,8 +302,15 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
             result = _parse_solver_output(output, proc.returncode)
             parse_ms = _first_number(_field(output, "Parse time ms"))
             presolve_ms = _first_number(_field(output, "Presolve time ms"))
+            standardization_ms = _first_number(_field(output, "Standardization time ms"))
             reported_solve_ms = _first_number(_field(output, "Solve time ms"))
             result.update({"solve_time_ms": reported_solve_ms,
+                           "solve_pipeline_time_ms": _first_number(_field(output, "Solve pipeline time ms")),
+                           "standardization_time_ms": standardization_ms,
+                           "standardized_rows": _int(_field(output, "Standardized rows")),
+                           "standardized_columns": _int(_field(output, "Standardized columns")),
+                           "standardized_nonzeros": _int(_field(output, "Standardized nonzeros")),
+                           "presolve_pass_stats": _presolve_pass_stats(output),
                            "postsolve_time_ms": _first_number(_field(output, "Postsolve time ms")),
                            "cli_verification_time_ms": _first_number(_field(output, "Verification time ms")), "cli_time_ms": elapsed,
                            "build_compiler": _field(output, "Build compiler"),
@@ -450,7 +476,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows({key: json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else value
+                          for key, value in row.items()} for row in rows)
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -535,7 +562,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             objective = check["objective"] if check["objective"] is not None else result.get("objective_value")
             failure_reason = row.get("failure_reason") or _verification_failure_reason(
                 result, check, candidate_status, objective_consistent)
-            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
+            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "solve_pipeline_time_ms", "standardization_time_ms", "standardized_rows", "standardized_columns", "standardized_nonzeros", "presolve_pass_stats", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
             row["presolve_fallback"] = result.get("presolve_fallback", False)
             row["presolve_applied_to_solve"] = (
                 classification == "LP" and not args.no_presolve and not row["presolve_fallback"]
@@ -614,6 +641,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "parsing_ms": row.get("parse_time_ms"),
             "model_preparation_ms": row.get("model_preparation_time_ms"),
             "presolve_ms": row.get("presolve_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
             "solver_ms": row.get("solve_time_ms"),
             "postsolve_ms": row.get("postsolve_time_ms"),
             "verification_ms": row.get("verification_time_ms"),
@@ -626,6 +654,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "parsing_ms": row.get("parse_time_ms"),
             "model_preparation_ms": row.get("model_preparation_time_ms"),
             "presolve_ms": row.get("presolve_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
             "solver_ms": row.get("solve_time_ms"),
             "postsolve_ms": row.get("postsolve_time_ms"),
             "verification_ms": row.get("verification_time_ms"),
