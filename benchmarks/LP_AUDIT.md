@@ -139,3 +139,31 @@ For an A/B check, the Phase 6 commit's PDHG header was compiled as a baseline an
 The 3–10% timing differences are not usable solve speedups: no benchmark reached the required convergence and verification criteria. The observed iterates do not justify routing these Netlib cases to PDHG as a way to obtain answers. The extra CSC storage and iterate averages therefore remain a CPU-path implementation experiment, not evidence that PDHG is ready for production large LPs.
 
 A small unit fixture (`x + y >= 1`, minimize `x + y`) also ran 100,000 iterations. It recovered a feasible objective-1 point but still reported `ITERATION_LIMIT`; the test asserts it cannot be labeled `OPTIMAL` without the required residuals. The original absolute-feasibility check now also gates convergence, preventing an internally scaled residual from masking a failed original-model check. Remaining CPU PDHG work includes better diagonal equilibration/acceleration and a converged medium/large benchmark; no such improvement is claimed here.
+
+## Phase 8 CUDA PDHG audit
+
+Built the current source with MSVC 19.29, CUDA 13.1, and a GeForce RTX 3050 Laptop GPU (4 GiB, compute capability 8.6). `scripts/lp_audit_benchmark.py` now accepts `--backend cpu|cuda|auto`, records the selected backend, and covers all 13 checked-in Netlib cases. Both backend runs use one CUDA-enabled executable, so they share the same compiler, solver revision, and preprocessing. Each 2,000-iteration result is the median of three runs; presolve is enabled. Raw data is in `lp_audit_phase8_cpu_2k.json` and `lp_audit_phase8_cuda_2k_average.json`.
+
+| Model | Rows × columns / NNZ | CPU solve ms | CUDA solve ms | CPU status | CUDA status |
+|---|---:|---:|---:|---|---|
+| AFIRO | 27 × 32 / 83 | 1.70 | 267.51 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Afiro2 | 27 × 32 / 83 | 1.80 | 263.51 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Adlittle | 56 × 97 / 383 | 7.24 | 269.25 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Agg | 488 × 163 / 2,410 | 30.18 | 257.82 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Bandm | 305 × 472 / 2,494 | 46.95 | 261.50 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Boeing1 | 440 × 384 / 3,819 | 48.58 | 264.79 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Boeing2 | 185 × 143 / 1,283 | 18.39 | 265.06 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Scagr25 | 471 × 500 / 1,554 | 40.87 | 260.88 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Scagr7 | 129 × 140 / 420 | 10.48 | 264.97 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Pilot | 1,441 × 3,652 / 43,167 | 513.33 | 286.17 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Small | 2 × 2 / 4 | 0.14 | 289.18 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Stocfor1 | 117 × 111 / 447 | 8.71 | 272.65 | ITERATION_LIMIT | ITERATION_LIMIT |
+| Stocfor2 | 2,157 × 2,031 / 8,343 | 169.55 | 276.60 | ITERATION_LIMIT | ITERATION_LIMIT |
+
+All 13 cases, including Afiro2 (same dimensions as AFIRO), reached the iteration cap; none of these rows is a solve-speed comparison. At 2,000 iterations the CUDA path takes about 258–289 ms across the corpus, largely due to per-process CUDA setup/launch/synchronization costs, and only Pilot is faster than the CPU path. Explicit CPU therefore remains the correct Auto choice for these checked-in cases. These dimensions also do not represent the requested million-scale regime.
+
+The CUDA path had two avoidable costs/consistency gaps. cuSPARSE dense-vector descriptors already retain the device pointers they were created with, so the four per-iteration `cusparseDnVecSetValues` calls were removed. CUDA also used to check only the latest iterate, while the CPU path checks ergodic averages. The CUDA update kernels now accumulate primal and dual sums without an extra kernel launch, residual checks use those averages, and a converged result returns the average. CUDA checks run every 25 iterations through iteration 500 and then every 250 iterations to reduce host round-trips; the configured final iteration is always checked.
+
+At 20,000 iterations, repeated twice on Agg, Bandm, Pilot, and Stocfor2, all CPU and CUDA runs still ended at `ITERATION_LIMIT`. CUDA and CPU residuals match to numerical precision after the averaging change, confirming the same candidate/residual semantics. CUDA medians were 2,738 ms / 2,374 ms / 2,420 ms / 2,443 ms; CPU medians were 310 ms / 468 ms / 5,745 ms / 1,827 ms, respectively. Pilot is about 2.4× faster on CUDA in this capped diagnostic, while the other three cases remain slower. The lower-frequency check schedule reduced the pre-average CUDA time by roughly 8–17% in this sample, but that gain varied after averaging and is not a solved-instance speedup. Raw runs are in `lp_audit_phase8_cpu_20k.json`, `lp_audit_phase8_cuda_20k_average_sparse_checks.json`, and the intermediate checkpoint-frequency experiment files.
+
+The current timing includes CUDA allocations, model upload, solver work, and synchronization inside the timed solve call. No backend threshold was changed: these results do not establish a reliable general crossover, and every larger benchmark still fails to converge within the test cap. The built-in Product mix LP also reached the 10,000-iteration limit on both CPU and CUDA with matching residuals (primal 0, dual 9.83e-4, complementarity 7.31e-4); the previous CUDA-only smoke result was not a CPU/GPU behavior difference. The checked-in corpus contains no million-scale sparse LP, so the large-workload routing policy remains unvalidated. The CUDA path only implements PDHG; Revised Simplex and Dual Simplex stay CPU-native. The CUDA-enabled build, PDHG unit test, and device-info check pass on the RTX 3050 host.

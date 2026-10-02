@@ -13,9 +13,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INSTANCES = {
     "afiro": ROOT / "benchmarks/netlib/small/afiro.mps",
+    "afiro2": ROOT / "benchmarks/netlib/small/afiro2.mps",
+    "adlittle": ROOT / "benchmarks/netlib/small/adlittle.mps",
+    "agg": ROOT / "benchmarks/netlib/small/agg.mps",
     "bandm": ROOT / "benchmarks/netlib/small/bandm.mps",
+    "boeing1": ROOT / "benchmarks/netlib/small/boeing1.mps",
+    "boeing2": ROOT / "benchmarks/netlib/small/boeing2.mps",
     "scagr25": ROOT / "benchmarks/netlib/small/scagr25.mps",
+    "scagr7": ROOT / "benchmarks/netlib/small/scagr7.mps",
     "pilot": ROOT / "benchmarks/netlib/small/pilot.mps",
+    "small": ROOT / "benchmarks/netlib/small/small.mps",
+    "stocfor1": ROOT / "benchmarks/netlib/small/stocfor1.mps",
+    "stocfor2": ROOT / "benchmarks/netlib/small/stocfor2.mps",
 }
 TIMING_FIELDS = {
     "parse_ms": "Parse time ms",
@@ -56,6 +65,7 @@ FLOAT_FIELDS = {
     "complementarity_residual": "Complementarity residual",
 }
 TEXT_FIELDS = {
+    "backend": "Backend",
     "presolve_termination": "Presolve termination",
     "fallback_reason": "Fallback reason",
     "dense_memory_guard": "Dense memory guard",
@@ -69,9 +79,10 @@ def field(output: str, label: str) -> str | None:
 
 
 def run_once(solver: Path, instance: Path, method: str, presolve: bool,
-             limit: int, timeout: float, presolve_time_ms: float = 0.0) -> dict:
+             limit: int, timeout: float, presolve_time_ms: float = 0.0,
+             backend: str = "cpu") -> dict:
     command = [str(solver), "--input", str(instance), "--method", method,
-               "--max-iterations", str(limit)]
+               "--max-iterations", str(limit), "--backend", backend]
     if not presolve:
         command.append("--no-presolve")
     elif presolve_time_ms > 0:
@@ -134,6 +145,8 @@ def main() -> int:
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=500)
     parser.add_argument("--timeout", type=float, default=8.0)
+    parser.add_argument("--backend", choices=("auto", "cpu", "cuda"), default="cpu",
+                        help="execution backend passed to each solver run")
     parser.add_argument("--presolve-time-ms", type=float, default=0.0,
                         help="optional C++ presolve budget (0 leaves it unlimited)")
     parser.add_argument("--output", type=Path, default=ROOT / "benchmarks/lp_audit_baseline.json")
@@ -160,7 +173,8 @@ def main() -> int:
             for method in methods:
                 for presolve in presolve_modes:
                     samples = [run_once(solver, instance, method, presolve,
-                                        args.max_iterations, args.timeout, args.presolve_time_ms)
+                                        args.max_iterations, args.timeout, args.presolve_time_ms,
+                                        args.backend)
                               for _ in range(args.repetitions)]
                     key = f"{label}/{instance_name}/{method}/presolve_{'on' if presolve else 'off'}"
                     results[key] = aggregate(samples)
@@ -177,6 +191,7 @@ def main() -> int:
         "solver_builds": {label: str(path) for label, path in solvers.items()},
         "instances": {name: str(DEFAULT_INSTANCES[name]) for name in args.instances},
         "method": methods,
+        "backend": args.backend,
         "repetitions": args.repetitions,
         "max_iterations_per_phase": args.max_iterations,
         "timeout_seconds_per_run": args.timeout,
