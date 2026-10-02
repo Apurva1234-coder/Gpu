@@ -10,7 +10,9 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,8 +32,45 @@ struct StandardLP {
     double constant{}; bool maximize{};
 };
 
+constexpr std::size_t DenseLPMemoryBudgetBytes = 256ULL * 1024ULL * 1024ULL;
+
+inline long double estimateDenseLPBytes(const Model& model) {
+    std::size_t columns = 0, rows = 0;
+    for (const auto& variable : model.variables) if (variable.active) {
+        columns += std::isfinite(variable.lower) ? 1 : 2;
+        if (std::isfinite(variable.upper)) ++rows;
+    }
+    for (const auto& constraint : model.constraints) if (constraint.active)
+        rows += constraint.relation == Relation::Equal ? 2 : 1;
+    const long double r = static_cast<long double>(rows);
+    const long double n = static_cast<long double>(columns);
+    // Peak can include standard form, tableau, standard matrix, and a basis
+    // matrix simultaneously. Artificial columns are bounded by row count.
+    const long double standardForm = r * n;
+    const long double tableau = (r + 1) * (n + 2 * r + 1);
+    const long double standardMatrix = r * (n + 2 * r);
+    const long double basis = r * r;
+    const long double vectorsAndRowHeaders = 64 * r + 32 * (n + r + 1);
+    return sizeof(double) * (standardForm + tableau + standardMatrix + basis) + vectorsAndRowHeaders;
+}
+
+inline bool denseLPWithinMemoryBudget(const Model& model) {
+    return estimateDenseLPBytes(model) <= static_cast<long double>(DenseLPMemoryBudgetBytes);
+}
+
+inline std::string denseLPMemoryGuardMessage(const Model& model) {
+    const long double estimatedMiB = estimateDenseLPBytes(model) / (1024.0L * 1024.0L);
+    const long double budgetMiB = static_cast<long double>(DenseLPMemoryBudgetBytes) / (1024.0L * 1024.0L);
+    std::ostringstream message;
+    message << "dense LP path refused: estimated peak workspace " << static_cast<double>(estimatedMiB)
+            << " MiB exceeds the " << static_cast<double>(budgetMiB)
+            << " MiB safety budget; use revised-simplex (sparse route) or PDHG";
+    return message.str();
+}
+
 inline StandardLP standardize(const Model& m, const Tolerance& t={}, bool preserveIntegrality=false) {
     (void)t;
+    if (!preserveIntegrality && !denseLPWithinMemoryBudget(m)) throw std::length_error(denseLPMemoryGuardMessage(m));
     StandardLP s; s.maximize=m.sense==Sense::Maximize;
     std::vector<std::size_t> ids;
     for(const auto& v:m.variables) if(v.active) {
@@ -162,6 +201,7 @@ public:
     explicit LPSolver(Tolerance t={}):tol_(t){}
     LPResult solve(const Model& m, LPMethod method=LPMethod::RevisedSimplex, std::size_t limit=10000, const Model* integralityModel=nullptr) const {
         LPResult out;out.method=methodName(method);
+        out.estimatedDenseMemoryBytes=static_cast<double>(estimateDenseLPBytes(m));
         for(const auto&v:m.variables)if(v.type!=VariableType::Continuous){out.status=LPStatus::Unsupported;out.method=methodName(method);return out;}
         if(!m.quadratic.empty()){out.status=LPStatus::Unsupported;return out;}
         if(!integralityModel) {
@@ -180,6 +220,12 @@ public:
                 (transformedVariables+2*standardizedRows+2);
             const long double matrixCells=static_cast<long double>(standardizedRows)*transformedVariables;
             const long double density=matrixCells>0?constraintNonzeros/matrixCells:1.0L;
+            if(!denseLPWithinMemoryBudget(m)) {
+                LPResult sparse=solveSparse(m,method,limit);
+                sparse.denseMemoryGuardTriggered=true;
+                sparse.message=denseLPMemoryGuardMessage(m)+"; sparse revised simplex selected";
+                return sparse;
+            }
             if(estimatedEntries>8.0e6L || (estimatedEntries>1.0e6L && density<0.0045L) ||
                (estimatedEntries>1.0e5L && density<0.03L && m.variables.size()<=m.constraints.size()))
                 return solveSparse(m,method,limit);
@@ -342,6 +388,7 @@ private:
     struct EtaUpdate { std::size_t row; std::vector<double> direction; };
     LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit) const {
         LPResult out; out.method=methodName(method);
+        out.estimatedDenseMemoryBytes=static_cast<double>(estimateDenseLPBytes(m));
         const auto standardizationStart=std::chrono::steady_clock::now();
         SparseStandardLP s=standardizeSparse(m,tol_);
         out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();

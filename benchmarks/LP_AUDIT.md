@@ -81,3 +81,12 @@ The Phase 3 profile compares commit `df48c6f` (Phase 2) with the current impleme
 The Pilot presolve stage measured 62.5% lower (121.947 ms to 45.670 ms) with five fewer passes and six fewer total recorded reductions; the first pass still removes 204 fixed variables. Bandm and Scagr25 presolve stages measured 46% and 48% lower, respectively, after five and four passes instead of ten. AFIRO remained verified optimal with effectively unchanged presolve time. These are presolve-stage comparisons, not a claim that LP solving is fixed: Bandm/Pilot still do not solve, and the Bandm status changed from numerical failure to the bounded iteration limit. Solver-time differences across changed reduced models must not be interpreted as same-problem algorithm speedups. The 500-iteration cap is diagnostic.
 
 The budget check runs only between passes. A deliberately 1 ms budget on Pilot stopped after its first pass at 32.8 ms, so a single expensive pass can exceed the budget. A finer-grained interrupt/checkpoint inside transformations remains future work.
+
+## Phase 4 changes
+
+- Added a conservative dense peak-workspace estimator for standardized form, tableau, standard matrix, basis, and vector/row storage. The shared limit is 256 MiB.
+- Revised Simplex routes to its existing sparse implementation before dense standardization if the estimate exceeds the limit. Dual Simplex and Mehrotra IPM return `UNSUPPORTED` with the estimate and budget instead of allocating dense matrices. Direct dense `standardize()` also rejects over-budget requests.
+- CLI, benchmark CSV/JSON, and Auto attempt telemetry now include the estimate, budget, and whether the guard triggered. The Auto attempt panel reports memory routing and the solver message.
+- Added a 4,000-row × 4,000-column sparse regression fixture with 4,000 nonzeros. Its estimated dense peak is about 977.9 MiB; tests confirm Revised Simplex selects sparse, Dual Simplex/IPM refuse, and direct dense standardization throws before allocation.
+
+The memory guard is about safety, not a performance result. The synthetic fixture only checks route/guard behavior and does not establish general 4,000 × 4,000 solve performance. CUDA free-memory admission checks and full large-model memory profiling remain open.

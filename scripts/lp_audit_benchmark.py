@@ -38,10 +38,15 @@ INTEGER_FIELDS = {
     "standardized_nonzeros": "Standardized nonzeros",
     "iterations": "Iterations",
     "attempt_count": "Attempt count",
+    "dense_memory_budget_bytes": "Dense memory budget bytes",
+}
+FLOAT_FIELDS = {
+    "estimated_dense_memory_bytes": "Estimated dense memory bytes",
 }
 TEXT_FIELDS = {
     "presolve_termination": "Presolve termination",
     "fallback_reason": "Fallback reason",
+    "dense_memory_guard": "Dense memory guard",
 }
 
 
@@ -65,6 +70,7 @@ def run_once(solver: Path, instance: Path, method: str, presolve: bool,
         output = proc.stdout + "\n" + proc.stderr
         record = {key: field(output, label) for key, label in TIMING_FIELDS.items()}
         record.update({key: field(output, label) for key, label in INTEGER_FIELDS.items()})
+        record.update({key: field(output, label) for key, label in FLOAT_FIELDS.items()})
         record.update({key: field(output, label) for key, label in TEXT_FIELDS.items()})
         record["presolve_time_budget_ms"] = field(output, "Presolve time budget ms")
         record.update({

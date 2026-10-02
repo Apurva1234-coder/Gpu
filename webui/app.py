@@ -574,6 +574,9 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "iteration_limit": _capture(r"^Iteration limit:\s*(.+)$", output, None),
         "attempt_count": _capture(r"^Attempt count:\s*(\d+)$", output, None, int),
         "fallback_reason": _capture(r"^Fallback reason:\s*([^\r\n]+)$", output, None),
+        "estimated_dense_memory_bytes": _capture(r"^Estimated dense memory bytes:\s*([^\r\n]+)$", output, None, float),
+        "dense_memory_budget_bytes": _capture(r"^Dense memory budget bytes:\s*([^\r\n]+)$", output, None, int),
+        "dense_memory_guard_triggered": _capture(r"^Dense memory guard:\s*(TRIGGERED|NOT TRIGGERED)$", output, None),
         "backend": _capture(r"^Backend:\s*(.+)$", output, "cpu"),
         "backend_reason": _capture(r"^Backend reason:\s*(.+)$", output, None),
         "method": _capture(r"^METHOD:\s*(.+)$", output, None) or _capture(r"^Method:\s*(.+)$", output, None),
@@ -1170,6 +1173,9 @@ def solve_automatically(request: AutoSolveRequest) -> dict[str, Any]:
             "postsolve_time_ms": timings.get("postsolve_time_ms"),
             "verification_time_ms": timings.get("verification_time_ms"),
             "iterations": metrics.get("iterations"),
+            "message": metrics.get("message"),
+            "estimated_dense_memory_bytes": metrics.get("estimated_dense_memory_bytes"),
+            "dense_memory_guard": metrics.get("dense_memory_guard_triggered"),
         }
 
     attempts = [attempt_record(configuration["method"], configuration["backend"], result, "Initial automatic selection")]

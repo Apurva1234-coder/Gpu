@@ -30,6 +30,9 @@ Final variables: 1
 Final constraints: 1
 Presolve reductions: 0
 Presolve fallback: YES
+Estimated dense memory bytes: 512000000
+Dense memory budget bytes: 268435456
+Dense memory guard: TRIGGERED
 Problem Type: LP
 Status: OPTIMAL
 Iterations: 2
@@ -218,6 +221,12 @@ ENDATA
     def test_presolve_fallback_is_captured(self):
         result = benchmark._parse_solver_output("Status: OPTIMAL\nPresolve fallback: YES\n", 0)
         self.assertTrue(result["presolve_fallback"])
+
+    def test_dense_memory_guard_telemetry_is_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["estimated_dense_memory_bytes"], 512000000.0)
+        self.assertEqual(result["dense_memory_budget_bytes"], 268435456)
+        self.assertTrue(result["dense_memory_guard_triggered"])
 
     def test_original_model_verification_bounds_integrality_and_objective(self):
         model = parse_problem_file(str(ROOT / "examples" / "milp_relaxation.json"))

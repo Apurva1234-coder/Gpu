@@ -16,6 +16,7 @@ public:
     LPResult solve(const Model& model, std::size_t limit = 10000) const {
         LPResult result;
         result.method = "pdhg";
+        result.estimatedDenseMemoryBytes = static_cast<double>(estimateDenseLPBytes(model));
         for (const auto& variable : model.variables) {
             if (variable.type != VariableType::Continuous) {
                 result.status = LPStatus::Unsupported;
