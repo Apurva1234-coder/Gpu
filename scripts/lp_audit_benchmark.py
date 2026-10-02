@@ -59,6 +59,7 @@ INTEGER_FIELDS = {
     "sparse_lexicographic_solves": "Sparse lexicographic solves",
 }
 FLOAT_FIELDS = {
+    "pdhg_primal_weight": "PDHG primal weight",
     "estimated_dense_memory_bytes": "Estimated dense memory bytes",
     "primal_residual": "Primal residual",
     "dual_residual": "Dual residual",

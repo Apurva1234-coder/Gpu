@@ -83,11 +83,17 @@ public:
                 return result;
             }
 
+        // Keep the relative primal/dual step weight explicit in telemetry.
+        // A norm-ratio experiment is recorded in the audit, but was not
+        // retained because it worsened residuals on several Netlib cases.
+        const double primalWeight = 1.0;
+        result.pdhgPrimalWeight = primalWeight;
+
         std::vector<double> tau(columns, 1.0), sigma(rows, 1.0);
         for (std::size_t j = 0; j < columns; ++j)
-            if (columnNorm[j] > tolerance_.zero) tau[j] = 0.99 / columnNorm[j];
+            if (columnNorm[j] > tolerance_.zero) tau[j] = 0.99 * primalWeight / columnNorm[j];
         for (std::size_t i = 0; i < rows; ++i)
-            if (rowNorm[i] > tolerance_.zero) sigma[i] = 0.99 / rowNorm[i];
+            if (rowNorm[i] > tolerance_.zero) sigma[i] = 0.99 / (primalWeight * rowNorm[i]);
 
         std::vector<double> primal(columns, 0.0), dual(rows, 0.0);
         std::vector<double> extrapolated(columns, 0.0), activity(rows), gradient(columns);

@@ -167,3 +167,34 @@ The CUDA path had two avoidable costs/consistency gaps. cuSPARSE dense-vector de
 At 20,000 iterations, repeated twice on Agg, Bandm, Pilot, and Stocfor2, all CPU and CUDA runs still ended at `ITERATION_LIMIT`. CUDA and CPU residuals match to numerical precision after the averaging change, confirming the same candidate/residual semantics. CUDA medians were 2,738 ms / 2,374 ms / 2,420 ms / 2,443 ms; CPU medians were 310 ms / 468 ms / 5,745 ms / 1,827 ms, respectively. Pilot is about 2.4× faster on CUDA in this capped diagnostic, while the other three cases remain slower. The lower-frequency check schedule reduced the pre-average CUDA time by roughly 8–17% in this sample, but that gain varied after averaging and is not a solved-instance speedup. Raw runs are in `lp_audit_phase8_cpu_20k.json`, `lp_audit_phase8_cuda_20k_average_sparse_checks.json`, and the intermediate checkpoint-frequency experiment files.
 
 The current timing includes CUDA allocations, model upload, solver work, and synchronization inside the timed solve call. No backend threshold was changed: these results do not establish a reliable general crossover, and every larger benchmark still fails to converge within the test cap. The built-in Product mix LP also reached the 10,000-iteration limit on both CPU and CUDA with matching residuals (primal 0, dual 9.83e-4, complementarity 7.31e-4); the previous CUDA-only smoke result was not a CPU/GPU behavior difference. The checked-in corpus contains no million-scale sparse LP, so the large-workload routing policy remains unvalidated. The CUDA path only implements PDHG; Revised Simplex and Dual Simplex stay CPU-native. The CUDA-enabled build, PDHG unit test, and device-info check pass on the RTX 3050 host.
+
+## Phase 9 PDHG step-weight experiment
+
+The native PDHG implementation uses a fixed relative primal/dual step weight of 1. The current benchmark residuals showed an imbalance between primal and dual progress, so a diagnostic tested a fixed initial weight of `||c||₂ / ||b||₂` (clamped to `[1e-4, 1e4]`) while keeping the product of the diagonal primal and dual step sizes unchanged. The C++ result and CLI now expose the chosen weight so future experiments are observable.
+
+The norm-ratio weight was rejected as a default. On 20,000-iteration CPU runs, all four cases still hit the cap. Pilot solve time changed from 5,745 ms to 5,223 ms, but its dual residual worsened from 0.869 to 0.999 and complementarity from 0.759 to 0.997. Bandm's dual residual worsened from 0.477 to 0.642. Stocfor2's dual residual improved from 0.469 to 0.083, but complementarity worsened from 0.112 to 0.765. Agg remained effectively unchanged. At 2,000 iterations, AFIRO, Small, Pilot, and Stocfor2 also remained `ITERATION_LIMIT`. Because the change trades progress among KKT conditions and does not consistently produce a verified solution, the solver keeps weight 1. Raw data is in `lp_audit_phase9_weight_cpu_20k.json` and `lp_audit_phase9_weight_cpu_2k.json`.
+
+This result is consistent with the limits of changing only a fixed weight: practical large-scale PDHG research combines adaptive step sizes, restart logic, diagonal preconditioning, and presolve; the reference method is described in the [PDLP paper](https://arxiv.org/abs/2106.04756). This repository does not use that external solver or its code. The native solver still lacks a tested adaptive step/restart scheme, and the current experiments do not justify a claim that its PDHG path solves medium or large LPs.
+
+## Phase 9 broader native LP-method profile
+
+Ran the native Mehrotra IPM on AFIRO, Bandm, Scagr25, and Pilot, then the native Revised Simplex on the remaining checked-in Netlib cases (MSVC Release, CPU, presolve on, 3 repetitions, 2,000 iteration limit, 12-second per-run timeout). Raw runs are `lp_audit_phase9_ipm_cpu.json` and `lp_audit_phase9_revised_cpu.json`.
+
+| Method / instance | Median solve time or limit | Result across 3 runs |
+|---|---:|---|
+| IPM / AFIRO | 978 ms | ITERATION_LIMIT |
+| IPM / Bandm | 12 s process timeout | TIMEOUT |
+| IPM / Scagr25 | 12 s process timeout | TIMEOUT |
+| IPM / Pilot | 0.11 ms | UNSUPPORTED by dense memory guard |
+| Revised / AFIRO | 0.22 ms | OPTIMAL |
+| Revised / Agg | 17.42 ms | OPTIMAL |
+| Revised / Bandm | 235 ms | NUMERICAL_FAILURE |
+| Revised / Boeing1 | 301 ms | NUMERICAL_FAILURE |
+| Revised / Boeing2 | 14.49 ms | OPTIMAL |
+| Revised / Scagr25 | 563 ms | NUMERICAL_FAILURE |
+| Revised / Pilot | 324 ms | NUMERICAL_FAILURE |
+| Revised / Stocfor2 | 5,658 ms | ITERATION_LIMIT |
+
+The IPM implementation forms a dense `p × p` normal-equation matrix with a nested row/column/nonzero accumulation every Newton direction, then solves it with the generic dense `LinearSystem`; that makes the algebraic work roughly proportional to `p² × n` before the dense factorization. Its current tolerance checks also provide no iteration-level residual output, so the 978 ms AFIRO result is time-to-limit, not time-to-solution. Pilot is refused before dense allocation. The Revised Simplex figures confirm that 5 of the 12 benchmark instances in this run do not return an optimum; Bandm, Boeing1, Scagr25, and Pilot fail numerically, while Stocfor2 exhausts the cap. The method profile therefore does not support “the solver is slow only because of CUDA”; the main issues are algorithm convergence, numerical reliability, and dense work in IPM.
+
+Together with the earlier Dual Simplex results, the current in-house LP algorithms have these limits: Revised Simplex solves the easy sparse cases but fails several larger ones; Dual Simplex builds dense matrices, is slow or fails on modest models, and refuses larger ones; IPM's dense normal equations time out or hit memory admission limits; PDHG is the only sparse GPU-capable path, but the current fixed-step method did not converge on the medium/large Netlib tests under the audit caps. There is no verified large-instance CPU/GPU win because the checked-in corpus has no truly large sparse LP.
