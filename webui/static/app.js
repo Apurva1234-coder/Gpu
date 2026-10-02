@@ -167,7 +167,7 @@ async function applyAnalysis(response, selection = state.modelSequence) {
 }
 
 function modelMethods(type) {
-  const fastest = {v:"auto",t:"Auto Engine Selection",d:"Try an installed compatible solver, verify its answer, and report the engine used; fall back to Sovereign when needed."};
+  const fastest = {v:"auto",t:"Sovereign Native Auto",d:"Choose an in-house Sovereign algorithm for this problem class; external solvers are only used in the separate comparison view."};
   if (type === "QP") return [fastest,{v:"qp", t:"Sovereign Newton / Barrier",d:"Use Sovereign's native convex-QP implementation."}];
   if (type === "MILP") return [fastest,{v:"milp",t:"Sovereign Branch-and-Bound",d:"Integer search with internal branching and root processing."},{v:"cutting-plane",t:"Sovereign Gomory Cutting Plane",d:"Standalone cutting-plane strategy."},{v:"feasibility-pump",t:"Sovereign Feasibility Pump",d:"Heuristic that searches for an integer-feasible point."}];
   return [fastest,{v:"revised-simplex",t:"Sovereign Revised Simplex",d:"Use Sovereign's native basis-based method."},{v:"dual-simplex",t:"Sovereign Dual Simplex",d:"Use Sovereign's native dual-feasible basis updates."},{v:"ipm",t:"Sovereign Interior Point Method",d:"Use Sovereign's native Mehrotra predictor-corrector path."}];

@@ -881,111 +881,6 @@ def load_example(example_name: str) -> dict[str, Any]:
     return {"job_id": job_id, "analysis": _public_analysis(summary)}
 
 
-def _run_auto_engine(job: dict[str, Any], configuration: dict[str, Any]) -> dict[str, Any] | None:
-    """Try compatible installed engines in priority order and verify the result.
-
-    Native Sovereign algorithms remain available by name. Auto mode delegates
-    to an installed production engine when possible and reports that engine
-    explicitly; otherwise the caller falls back to the native solver.
-    """
-    started = time.perf_counter()
-    parse_started = time.perf_counter()
-    model = parse_problem_file(str(job["path"]))
-    parse_ms = (time.perf_counter() - parse_started) * 1000
-    candidates = ["gurobi", "cplex"]
-    if not model.has_quadratic_objective:
-        candidates.append("highs")
-    limit = float(configuration.get("time_limit_seconds") or 0)
-    if limit <= 0:
-        limit = 3600.0
-
-    for engine in candidates:
-        # Benchmarked on the bundled 25fv47 medium LP: Gurobi barrier is
-        # consistently faster than its automatic method there. Keep tiny LPs
-        # on Gurobi's default method (barrier regressed on Afiro), and do not
-        # apply this LP-only choice to discrete or quadratic models.
-        tuned_method = (
-            2 if engine == "gurobi"
-            and configuration.get("problem_type") == "LP"
-            and str(configuration.get("model_size", "")).upper() == "MEDIUM"
-            and not model.has_discrete_variables
-            and not model.has_quadratic_objective
-            else None
-        )
-        reference = solve_comparator(engine, model, limit, include_solution=True,
-                                     gurobi_method=tuned_method, check_availability=False)
-        primal = reference.pop("primal_values", None)
-        if reference.get("verification") != "PASS" or not primal:
-            continue
-
-        solve_ms = reference.get("solve_time_ms")
-        objective = reference.get("objective")
-        status = str(reference.get("status") or "FAILED").upper()
-        configuration["backend"] = engine
-        configuration["resolved_backend"] = engine
-        resolved_algorithm = f"{engine}-barrier" if engine == "gurobi" and tuned_method == 2 else engine
-        configuration["resolved_algorithm"] = resolved_algorithm
-        tuning_note = " with Gurobi's barrier method for this medium continuous LP" if tuned_method == 2 else ""
-        configuration["backend_reason"] = f"Auto selected the installed {engine.upper()} engine{tuning_note}; its solution was independently verified against the original model."
-        metrics = {
-            "objective": objective,
-            "iterations": reference.get("iterations"),
-            "nodes_created": None,
-            "nodes_processed": reference.get("nodes"),
-            "nodes_pruned": None,
-            "lp_solves": None,
-            "lp_iterations": None,
-            "primal_bound": None,
-            "dual_bound": reference.get("best_bound"),
-            "absolute_gap": None,
-            "relative_gap": reference.get("relative_gap"),
-            "primal_residual": reference.get("primal_residual"),
-            "dual_residual": None,
-            "feasibility": reference.get("primal_residual"),
-            "iteration_limit": None,
-            "backend": engine,
-            "backend_reason": configuration["backend_reason"],
-            "method": resolved_algorithm,
-            "selected_algorithm": "auto",
-            "resolved_algorithm": resolved_algorithm,
-            "message": reference.get("failure_reason"),
-            "problem_type": configuration.get("problem_type"),
-        }
-        variables = [
-            {"name": variable.name, "value": float(primal[index])}
-            for index, variable in enumerate(model.variables)
-        ]
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        result = {
-            "status": status,
-            "verification": reference["verification"],
-            "timings": {
-                "parse_time_ms": parse_ms,
-                "presolve_time_ms": None,
-                "solver_time_ms": solve_ms,
-                "postsolve_time_ms": 0.0,
-                "verification_time_ms": max(0.0, elapsed_ms - parse_ms - float(solve_ms or 0.0)),
-                "backend_total_time_ms": elapsed_ms,
-                "model_preparation_time_ms": float(job.get("preparation_time_ms", 0.0)),
-            },
-            "metrics": metrics,
-            "presolve": {
-                "before_variables": len(model.variables),
-                "before_constraints": len(model.constraints),
-                "after_variables": None,
-                "after_constraints": None,
-                "reductions": None,
-            },
-            "variables": variables,
-            "sparse_primal": False,
-            "raw_log": f"Auto engine: {engine.upper()}\\nVerification: PASS\\n",
-        }
-        _record_execution_trace(result, job, configuration)
-        _publish_timing_contract(result, elapsed_ms + float(job.get("preparation_time_ms", 0.0)))
-        return result
-    return None
-
-
 def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any]) -> dict[str, Any]:
     global ACTIVE_SOLVER_PROCESS, ACTIVE_SOLVER_JOB_ID
     if job.get("state") == "cancelled":
@@ -995,13 +890,10 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
     model_size = SolverPolicy.limits_for(job["analysis"])[0].name
     configuration["model_size"] = model_size
     configuration["problem_type"] = str(job["analysis"].get("problem_type", "UNKNOWN")).upper()
-    # Older clients may still submit method=auto. Keep their request safe and
-    # deterministic: Revised Simplex by default, CPU auto-routing, tiered time.
+    # Auto always selects an in-house Sovereign algorithm. Reference solvers
+    # are used only by the separate, explicitly requested comparison route.
     if configuration.get("method") == "auto":
         selection = SolverPolicy.select(job["analysis"], info)
-        auto_engine_result = _run_auto_engine(job, configuration)
-        if auto_engine_result is not None:
-            return auto_engine_result
         configuration["method"] = selection.method
         configuration["selected_algorithm"] = selection.method
         configuration["user_selected_algorithm"] = selection.method
