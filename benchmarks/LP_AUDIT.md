@@ -198,3 +198,20 @@ Ran the native Mehrotra IPM on AFIRO, Bandm, Scagr25, and Pilot, then the native
 The IPM implementation forms a dense `p × p` normal-equation matrix with a nested row/column/nonzero accumulation every Newton direction, then solves it with the generic dense `LinearSystem`; that makes the algebraic work roughly proportional to `p² × n` before the dense factorization. Its current tolerance checks also provide no iteration-level residual output, so the 978 ms AFIRO result is time-to-limit, not time-to-solution. Pilot is refused before dense allocation. The Revised Simplex figures confirm that 5 of the 12 benchmark instances in this run do not return an optimum; Bandm, Boeing1, Scagr25, and Pilot fail numerically, while Stocfor2 exhausts the cap. The method profile therefore does not support “the solver is slow only because of CUDA”; the main issues are algorithm convergence, numerical reliability, and dense work in IPM.
 
 Together with the earlier Dual Simplex results, the current in-house LP algorithms have these limits: Revised Simplex solves the easy sparse cases but fails several larger ones; Dual Simplex builds dense matrices, is slow or fails on modest models, and refuses larger ones; IPM's dense normal equations time out or hit memory admission limits; PDHG is the only sparse GPU-capable path, but the current fixed-step method did not converge on the medium/large Netlib tests under the audit caps. There is no verified large-instance CPU/GPU win because the checked-in corpus has no truly large sparse LP.
+
+## Phase 10 presolve A/B and Auto policy correction
+
+To isolate the Revised Simplex verification failures, ran the same MSVC Release dense Revised Simplex binary with presolve on and off on the same four Netlib models (3 repetitions, 2,000 iterations, 12-second timeout). Raw output: `lp_audit_phase10_dense_presolve_ab.json`.
+
+| Model | Presolve on: median / status / original check | Presolve off: median / status / original check |
+|---|---:|---:|
+| Bandm | 233 ms / NUMERICAL_FAILURE / FAIL | 357 ms / OPTIMAL / PASS |
+| Boeing1 | 283 ms / NUMERICAL_FAILURE / FAIL | 253 ms / OPTIMAL / PASS |
+| Scagr25 | 549 ms / NUMERICAL_FAILURE / FAIL | 413 ms / OPTIMAL / PASS |
+| Scagr7 | 9.8 ms / NUMERICAL_FAILURE / FAIL | 14.1 ms / OPTIMAL / PASS |
+
+Each row had the same outcome in all three repetitions. This identifies a more consequential presolve regression than the earlier timing-only sweep: its reduced-model candidates were being rejected by original-space verification, whereas the same native method solved the untouched model. Presolve-on candidate objectives also differed from the verified no-presolve optima on Scagr25 and Scagr7. The no-presolve route is slightly slower on Bandm and Scagr7, but returns a verified optimum; time-to-failure is not an acceptable speed metric.
+
+The web Auto policy already disabled presolve for the three medium cases Bandm, Boeing1, and Scagr25. It now also disables it for structurally similar 100–200 variable/row LPs with at least 97% sparsity, covering the measured Scagr7 case. MILP/QP policy and the LP method are unchanged. The direct CLI still lets users explicitly use or disable presolve.
+
+An experimental broadened sparse routing rule was also rejected. Routing Bandm to sparse Revised Simplex did not change its presolved `NUMERICAL_FAILURE` result and increased median solve time from 233 ms to about 1,236 ms. No-presolve dense Revised Simplex returned `OPTIMAL` in about 357 ms. Raw path experiment: `lp_audit_phase10_sparse_route_trial.json`; matched sparse-route presolve data: `lp_audit_phase10_presolve_ab.json`. Pilot still fails under both presolve settings because sparse Phase I reports an auxiliary unbounded status; Stocfor2 does not finish within these caps. Those remain open correctness/performance failures.

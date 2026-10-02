@@ -22,6 +22,11 @@ class SolverPolicyTests(unittest.TestCase):
                 self.assertFalse(selection.presolve)
                 self.assertIn("verified local Netlib presolve sweep", selection.reason)
 
+    def test_scagr7_uses_no_presolve_after_verified_numerical_failure_ab(self):
+        selection = self.selection(140, 129, 420, 97.67)
+        self.assertFalse(selection.presolve)
+        self.assertIn("without presolve", selection.reason)
+
     def test_presolve_remains_enabled_outside_measured_medium_sparse_range(self):
         for data in ((32, 27, 83, 90.39), (163, 488, 2410, 96.97), (3652, 1441, 43167, 99.18), (400, 400, 8000, 95.0)):
             with self.subTest(model=data):

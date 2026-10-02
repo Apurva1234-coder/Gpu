@@ -92,16 +92,18 @@ class SolverPolicy:
         nonzeros = int(analysis.get("nonzeros", 0))
         sparsity = float(analysis.get("sparsity", 0.0))
         sparse = float(analysis.get("sparsity", 0)) >= 90
-        # The local, original-model-verified Netlib sweep found that row-only
-        # presolve made Bandm, Boeing1, and Scagr25 32-38% slower in this
-        # medium sparse range. Keep presolve enabled for small and large LPs:
-        # Afiro benefited slightly, while Pilot's presolved run avoided a
-        # worse unbounded status but still ended in numerical failure.
+        # Same-build Netlib A/B runs found that presolve-enabled Revised
+        # Simplex returned NUMERICAL_FAILURE with failed original-model checks
+        # on Bandm, Boeing1, Scagr25, and Scagr7. The matching no-presolve runs
+        # returned OPTIMAL with original-model verification PASS. Keep the
+        # exception narrow and structure-based; Pilot still fails either way.
         skip_lp_presolve = (
             problem_type == "LP"
-            and 300 <= variables <= 700
-            and 250 <= constraints <= 500
             and sparsity >= 97.0
+            and (
+                (300 <= variables <= 700 and 250 <= constraints <= 500)
+                or (100 <= variables <= 200 and 100 <= constraints <= 200)
+            )
         )
         structure = "large sparse constraint matrix" if limits.name == "LARGE" and sparse else "model dimensions and nonzero structure"
         size = f"{variables} variables, {constraints} constraints, and {nonzeros} nonzeros"
