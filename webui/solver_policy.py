@@ -41,9 +41,9 @@ class SolverSelection:
 class SolverPolicy:
     """Choose implemented solver paths and bounded resources from model complexity.
 
-    The normal LP path defaults to Revised Simplex. Backend selection remains
-    conservative until same-model, verified CPU/CUDA comparisons demonstrate
-    a benefit for a supported algorithm and model-size tier.
+    LP routing uses Revised Simplex by default and sparse PDHG for a narrowly
+    defined very-large sparse structure. Backend selection remains conservative
+    until same-model, verified CPU/CUDA comparisons demonstrate a benefit.
     Revised/Dual simplex and MILP branch-and-bound remain CPU paths.
     """
 
@@ -122,10 +122,35 @@ class SolverPolicy:
             backend_reason = "MILP branch-and-bound control and its verified automatic path run on CPU."
             fallbacks = ()
         else:
-            method = "revised-simplex"
-            reason = f"Revised Simplex is the default supported LP method ({size}); sparse structure alone does not change the selected algorithm."
-            backend_reason = "CPU selected conservatively; no verified same-model evidence currently shows a CUDA speedup for a production LP method."
-            fallbacks = ("dual-simplex",)
+            # PDHG stores and operates on the sparse constraint matrix. Route
+            # only genuinely large, extremely sparse LPs to it; the checked-in
+            # Netlib set is too small to establish a general speed crossover.
+            # Smaller or less sparse models retain Revised Simplex, whose own
+            # implementation selects dense or sparse linear algebra by model
+            # structure and has stronger results on the measured small case.
+            large_sparse_pdhg = (
+                variables >= 100_000
+                and constraints >= 10_000
+                and nonzeros >= 1_000_000
+                and sparsity >= 99.5
+            )
+            if large_sparse_pdhg:
+                method = "pdhg"
+                reason = (
+                    f"PDHG selected for a very large sparse LP ({size}, {sparsity:.3f}% sparse): "
+                    "its matrix-vector path is sparse and avoids simplex basis growth. "
+                    "This is a memory/scale routing rule, not a measured speedup guarantee; "
+                    "the result remains subject to convergence and original-model verification."
+                )
+                backend_reason = "CPU selected; no verified same-model CPU/CUDA crossover is available for this PDHG workload."
+                # A second full solve is not justified at this scale without
+                # measured fallback benefit and a separately budgeted policy.
+                fallbacks = ()
+            else:
+                method = "revised-simplex"
+                reason = f"Revised Simplex selected for this LP structure ({size}, {sparsity:.3f}% sparse); its implementation chooses dense or sparse linear algebra from estimated work and memory."
+                backend_reason = "CPU selected conservatively; no verified same-model evidence currently shows a CUDA speedup for a production LP method."
+                fallbacks = ("dual-simplex",)
 
         if skip_lp_presolve:
             reason += " The verified local Netlib presolve sweep favored solving an LP in this sparse dimension range without presolve; the advanced setting can override this choice."

@@ -90,3 +90,18 @@ The budget check runs only between passes. A deliberately 1 ms budget on Pilot s
 - Added a 4,000-row × 4,000-column sparse regression fixture with 4,000 nonzeros. Its estimated dense peak is about 977.9 MiB; tests confirm Revised Simplex selects sparse, Dual Simplex/IPM refuse, and direct dense standardization throws before allocation.
 
 The memory guard is about safety, not a performance result. The synthetic fixture only checks route/guard behavior and does not establish general 4,000 × 4,000 solve performance. CUDA free-memory admission checks and full large-model memory profiling remain open.
+
+## Phase 5 algorithm-selection measurements and policy
+
+An MSVC x64 Release executable was used for three runs each on AFIRO, Bandm, Scagr25, and Pilot, with presolve on, a 2,000-iteration cap, and an 8-second process timeout. Raw Revised Simplex and PDHG measurements are in `lp_audit_phase5_revised.json` and `lp_audit_phase5_pdhg.json`; Dual Simplex measurements are in `lp_audit_phase5_dual.json`.
+
+| Model | Revised Simplex median solve ms / status | PDHG median solve ms / status | Dual Simplex median solve ms / status |
+|---|---:|---:|---:|
+| AFIRO | 0.226 / OPTIMAL, verification PASS | 1.828 / ITERATION_LIMIT | 27.853 / OPTIMAL |
+| Bandm | 250.245 / NUMERICAL_FAILURE | 59.504 / ITERATION_LIMIT | 3,131.772 / NUMERICAL_FAILURE |
+| Scagr25 | 707.882 / NUMERICAL_FAILURE | 51.724 / ITERATION_LIMIT | TIMEOUT at 8 s |
+| Pilot | 507.420 / NUMERICAL_FAILURE | 688.654 / ITERATION_LIMIT | UNSUPPORTED by dense-memory guard |
+
+PDHG was faster on Bandm and Scagr25 in this bounded diagnostic, but did not produce a verified solution on any of the four instances; it was slower on Pilot and AFIRO. Dual Simplex was substantially slower on AFIRO and Bandm, timed out on Scagr25, and was correctly refused for Pilot. These results do not support a broad PDHG or Dual Simplex default. The pilot Auto policy therefore retains Revised Simplex for ordinary small/medium structures and routes only very large sparse LPs (at least 100,000 columns, 10,000 rows, 1,000,000 entries, and 99.5% sparsity) to sparse PDHG as the scale-oriented algorithm. It disables a second full-solve fallback on that route. That threshold is a transparent routing policy, not an empirically established speed crossover; status and original-model verification remain authoritative. CPU is retained because no paired, verified CPU/CUDA crossover has been established.
+
+No million-scale input is present in the checked-in benchmark corpus. Phase 5 validates the dispatch decision with synthetic analysis metadata only; it does not claim million-scale parse, memory, convergence, or solve performance.

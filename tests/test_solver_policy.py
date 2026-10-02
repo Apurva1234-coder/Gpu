@@ -27,6 +27,23 @@ class SolverPolicyTests(unittest.TestCase):
             with self.subTest(model=data):
                 self.assertTrue(self.selection(*data).presolve)
 
+    def test_very_large_sparse_lp_selects_pdhg_without_second_full_solve(self):
+        selection = self.selection(1_000_000, 100_000, 3_200_000, 99.996)
+        self.assertEqual(selection.method, "pdhg")
+        self.assertEqual(selection.fallback_methods, ())
+        self.assertIn("memory/scale routing rule", selection.reason)
+        self.assertIn("no verified same-model CPU/CUDA crossover", selection.backend_reason)
+
+    def test_large_dense_and_medium_sparse_lp_keep_revised_simplex(self):
+        large_dense = self.selection(120_000, 20_000, 120_000_000, 50.0)
+        medium_sparse = self.selection(10_000, 5_000, 100_000, 99.8)
+        self.assertEqual(large_dense.method, "revised-simplex")
+        self.assertEqual(medium_sparse.method, "revised-simplex")
+
+    def test_large_sparse_dispatch_does_not_change_milp_routing(self):
+        selection = self.selection(1_000_000, 100_000, 3_200_000, 99.996, problem_type="MILP")
+        self.assertEqual(selection.method, "milp")
+
     def test_milp_does_not_use_lp_presolve_heuristic(self):
         self.assertTrue(self.selection(472, 305, 2494, 98.27, problem_type="MILP").presolve)
 
