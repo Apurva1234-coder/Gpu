@@ -30,6 +30,13 @@ class SolverPolicyTests(unittest.TestCase):
     def test_milp_does_not_use_lp_presolve_heuristic(self):
         self.assertTrue(self.selection(472, 305, 2494, 98.27, problem_type="MILP").presolve)
 
+    def test_dense_fallback_estimate_is_bounded_for_large_models(self):
+        small = {"variables": 472, "constraints": 305}
+        large = {"variables": 100_000, "constraints": 80_000}
+        self.assertTrue(SolverPolicy.dense_fallback_is_safe(small))
+        self.assertFalse(SolverPolicy.dense_fallback_is_safe(large))
+        self.assertGreater(SolverPolicy.dense_fallback_memory_bytes(large), SolverPolicy.DENSE_FALLBACK_MEMORY_BUDGET_BYTES)
+
 
 if __name__ == "__main__":
     unittest.main()

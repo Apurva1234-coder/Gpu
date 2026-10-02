@@ -55,6 +55,7 @@ class SolverPolicy:
         ("LARGE", float("inf"), ExecutionLimits("LARGE", 50_000, 300, 500_000)),
     )
     PROBLEM_WEIGHTS = {"LP": 1.0, "QP": 1.25, "MILP": 2.5}
+    DENSE_FALLBACK_MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
 
     @classmethod
     def complexity(cls, analysis: dict[str, Any]) -> float:
@@ -149,3 +150,18 @@ class SolverPolicy:
     @staticmethod
     def can_fallback(status: str, verification: str) -> bool:
         return status.upper() in {"NUMERICAL_FAILURE", "FAILED"} or verification.upper() == "FAIL"
+
+    @classmethod
+    def dense_fallback_memory_bytes(cls, analysis: dict[str, Any]) -> int:
+        """Conservative estimate for the dense dual-simplex fallback workspace."""
+        rows = max(0, int(analysis.get("constraints", 0)))
+        columns = max(0, int(analysis.get("variables", 0)))
+        # Standardization can add bound rows and split free variables. Bound
+        # both dimensions by twice the total input dimensions, then budget for
+        # the standardized matrix, the dense tableau, basis, and transpose.
+        dimension = 2 * (rows + columns)
+        return 8 * (5 * dimension * dimension + 8 * dimension)
+
+    @classmethod
+    def dense_fallback_is_safe(cls, analysis: dict[str, Any]) -> bool:
+        return cls.dense_fallback_memory_bytes(analysis) <= cls.DENSE_FALLBACK_MEMORY_BUDGET_BYTES

@@ -570,6 +570,8 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "dual_residual": _capture(r"^Dual residual:\s*([^\r\n]+)$", output, None, float),
         "feasibility": _capture(r"^Feasibility:\s*([^\r\n]+)$", output, None, float),
         "iteration_limit": _capture(r"^Iteration limit:\s*(.+)$", output, None),
+        "attempt_count": _capture(r"^Attempt count:\s*(\d+)$", output, None, int),
+        "fallback_reason": _capture(r"^Fallback reason:\s*([^\r\n]+)$", output, None),
         "backend": _capture(r"^Backend:\s*(.+)$", output, "cpu"),
         "backend_reason": _capture(r"^Backend reason:\s*(.+)$", output, None),
         "method": _capture(r"^METHOD:\s*(.+)$", output, None) or _capture(r"^Method:\s*(.+)$", output, None),
@@ -944,7 +946,7 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         command.extend(["--max-nodes", str(configuration.get("max_nodes", 10000))])
         if int(job["analysis"].get("variables", 0)) >= 50_000:
             command.append("--sparse-primal")
-    execution_limit = int(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
+    execution_limit = float(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
     process: subprocess.Popen[str] | None = None
     try:
         with JOB_LOCK:
@@ -995,7 +997,7 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
         _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
         result["status"] = "TIME_LIMIT"
-        result["metrics"]["message"] = f"The solver reached the configured {execution_limit}-second time limit."
+        result["metrics"]["message"] = f"The solver reached the configured {execution_limit:g}-second time limit."
     finally:
         with JOB_LOCK:
             job.pop("process", None)
@@ -1142,17 +1144,47 @@ def solve_automatically(request: AutoSolveRequest) -> dict[str, Any]:
     configuration["backend"] = "auto"
     configuration["execution_time_limit_seconds"] = configuration["time_limit_seconds"]
     result = _run_solver(request.job_id, job, configuration)
-    attempts = [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"], "reason": "Initial automatic selection"}]
-    if selection.fallback_methods and SolverPolicy.can_fallback(result["status"], result["verification"]):
+    def attempt_record(method: str, backend: str, attempt_result: dict[str, Any], reason: str) -> dict[str, Any]:
+        timings = attempt_result.get("timings") or {}
+        metrics = attempt_result.get("metrics") or {}
+        return {
+            "method": method,
+            "backend": backend,
+            "status": attempt_result["status"],
+            "verification": attempt_result["verification"],
+            "reason": reason,
+            "time_ms": timings.get("backend_total_time_ms"),
+            "presolve_time_ms": timings.get("presolve_time_ms"),
+            "solver_time_ms": timings.get("solver_time_ms"),
+            "postsolve_time_ms": timings.get("postsolve_time_ms"),
+            "verification_time_ms": timings.get("verification_time_ms"),
+            "iterations": metrics.get("iterations"),
+        }
+
+    attempts = [attempt_record(configuration["method"], configuration["backend"], result, "Initial automatic selection")]
+    fallback_reason: str | None = None
+    eligible_for_fallback = bool(selection.fallback_methods) and SolverPolicy.can_fallback(result["status"], result["verification"])
+    if eligible_for_fallback and not SolverPolicy.dense_fallback_is_safe(job["analysis"]):
+        estimated = SolverPolicy.dense_fallback_memory_bytes(job["analysis"])
+        fallback_reason = f"Skipped dense Dual Simplex fallback: estimated workspace {estimated:,} bytes exceeds the {SolverPolicy.DENSE_FALLBACK_MEMORY_BUDGET_BYTES:,}-byte safety budget."
+    elif eligible_for_fallback:
+        limit_seconds = int(configuration.get("time_limit_seconds", 0))
+        elapsed_seconds = time.perf_counter() - request_started
+        remaining_seconds = limit_seconds - elapsed_seconds if limit_seconds > 0 else 0
+        if limit_seconds > 0 and remaining_seconds <= 0:
+            fallback_reason = "Skipped fallback because the automatic request's shared time limit is exhausted."
+    if eligible_for_fallback and fallback_reason is None:
         fallback_method = selection.fallback_methods[0]
         fallback_backend = "auto"
         fallback_configuration = {**configuration, "method": fallback_method, "backend": fallback_backend}
-        if not configuration.get("presolve", True):
-            fallback_configuration["presolve"] = True
+        limit_seconds = int(configuration.get("time_limit_seconds", 0))
+        fallback_configuration["execution_time_limit_seconds"] = max(0.01, limit_seconds - (time.perf_counter() - request_started)) if limit_seconds > 0 else 0
         fallback = _run_solver(request.job_id, job, fallback_configuration)
-        attempts.append({"method": fallback_method, "backend": fallback_configuration["backend"], "status": fallback["status"], "verification": fallback["verification"], "reason": f"Fallback after {result['status']} / verification {result['verification']}"})
+        attempts.append(attempt_record(fallback_method, fallback_configuration["backend"], fallback, f"Fallback after {result['status']} / verification {result['verification']}"))
         result, configuration = fallback, fallback_configuration
-    automation = {"mode": "automatic", "selection": selection.payload(), "attempts": attempts, "final_method": configuration["method"], "final_backend": configuration["backend"]}
+    elif eligible_for_fallback and fallback_reason:
+        attempts.append({"method": selection.fallback_methods[0], "backend": "auto", "status": "SKIPPED", "verification": "N/A", "reason": fallback_reason, "time_ms": 0.0, "iterations": 0})
+    automation = {"mode": "automatic", "selection": selection.payload(), "attempts": attempts, "final_method": configuration["method"], "final_backend": configuration["backend"], "fallback_reason": fallback_reason}
     completed = _complete_result(request.job_id, job, configuration, result, automation)
     _publish_timing_contract(completed, float(job.get("preparation_time_ms", 0.0)) + (time.perf_counter() - request_started) * 1000)
     job["result"] = completed

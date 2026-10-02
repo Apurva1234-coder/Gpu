@@ -52,4 +52,12 @@ Presolve pass telemetry from the instrumented run showed diminishing returns. Fo
 - Added parsers to the Python benchmark and web API timing contracts for the new values. CSV output serializes nested profile data as JSON.
 - Added a repeatable before/after LP audit harness and committed the raw three-run profile at `benchmarks/lp_audit_baseline.json`.
 
-The next checkpoint is fallback attempt tracing and eliminating unnecessary duplicate full solves. Presolve adaptation, dense-memory guards, and structure-based algorithm dispatch remain unimplemented at this checkpoint.
+## Phase 2 changes
+
+- C++ now performs exactly one LP algorithm attempt per process. If an optimal presolved candidate fails original-model verification, it is reported as `NUMERICAL_FAILURE`; the CLI explains that the automatic full-model retry was skipped. The measured timing and iteration count therefore cannot silently include a second algorithm run.
+- Web Auto can launch at most one explicit Dual Simplex fallback. It records method, backend, status, original-model verification, total time, per-stage times, iterations, and the reason for each attempt. The automatic request shares one wall-clock budget across both attempts.
+- Fallback preserves the same presolve setting. The previous behavior that silently enabled presolve on the retry is removed.
+- Dual Simplex fallback is skipped if a conservative estimate for the dense standardized matrix/tableau/basis workspaces exceeds 256 MiB. The skip is returned in the attempt history. This is a fallback-specific guard; manually choosing dense algorithms is still an open memory-safety item.
+- The Auto result panel now shows each attempt and its measured time/iterations, including why a fallback was skipped.
+
+The Phase 2 tests cover attempt history, preserved presolve configuration, and dense-fallback memory eligibility. No solver speedup claim is made from this change. Presolve adaptation, comprehensive guards for manually selected dense algorithms, and structure-based algorithm dispatch remain open.
