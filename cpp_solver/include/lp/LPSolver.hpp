@@ -397,7 +397,7 @@ private:
         struct SparseMetricsScope {
             LPResult& result; double& pricing; double& basis; double& devex; double& factorization; double& ratio; double& lexicographic;
             std::size_t& refactorizations; std::size_t& pivots; std::size_t& lexicographicSolves; bool& blandFallbackTriggered;
-            ~SparseMetricsScope() {
+            void publish() {
                 result.sparsePricingTimeMs=pricing; result.sparseBasisSolveTimeMs=basis;
                 result.sparseDevexTimeMs=devex; result.sparseFactorizationTimeMs=factorization;
                 result.sparseRatioTestTimeMs=ratio; result.sparseLexicographicTimeMs=lexicographic;
@@ -405,7 +405,12 @@ private:
                 result.sparseLexicographicSolves=lexicographicSolves;
                 result.sparseBlandFallbackTriggered=blandFallbackTriggered;
             }
+            ~SparseMetricsScope() { publish(); }
         } metricsScope{out,pricingMs,basisSolveMs,devexMs,factorizationMs,ratioTestMs,lexicographicMs,refactorizations,pivots,lexicographicSolves,blandFallbackTriggered};
+        // Explicitly publish before returning by value. Return-value moves can
+        // happen before local destructors run, which otherwise dropped all
+        // sparse stage timings and counters from the returned LPResult.
+        auto finish=[&](){metricsScope.publish();return out;};
         auto addElapsed=[](double& target,const std::chrono::steady_clock::time_point& start) {
             target+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
         };
@@ -415,7 +420,7 @@ private:
         for(const auto& row:s.A)out.standardizedNonzeros+=row.size();
         out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
         const std::size_t n=s.c.size(), R=s.A.size();
-        if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
+        if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return finish(); }
         std::vector<bool> needsArtificial(R,false);
         std::size_t artificialCount=0;
         for(std::size_t i=0;i<R;++i) if(s.b[i]<-tol_.feasibility) { needsArtificial[i]=true; ++artificialCount; }
@@ -477,7 +482,7 @@ private:
             }
             return factorization.solveTranspose(transformed,result,transposeWork);
         };
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="initial sparse basis factorization failed";return out;}
+        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="initial sparse basis factorization failed";return finish();}
         std::string simplexFailure;
         std::vector<double> cb(R,0.0), y(R,0.0), enteringColumn(R,0.0), direction(R,0.0);
         std::vector<double> devexUnit(R,0.0), devexRow(R,0.0);
@@ -610,13 +615,13 @@ private:
         };
         std::size_t phaseOneIterations=0;
         LPStatus status=simplex(true,limit,phaseOneIterations); out.iterations=phaseOneIterations;
-        if(status==LPStatus::IterationLimit) { out.status=status; out.message="phase-I iteration limit"; return out; }
-        if(status==LPStatus::Unbounded) { out.status=LPStatus::NumericalFailure; out.message="phase-I auxiliary objective was incorrectly reported unbounded"; return out; }
-        if(status!=LPStatus::Optimal) { out.status=status; out.message=simplexFailure.empty()?"phase I did not find a feasible basis":simplexFailure; return out; }
+        if(status==LPStatus::IterationLimit) { out.status=status; out.message="phase-I iteration limit"; return finish(); }
+        if(status==LPStatus::Unbounded) { out.status=LPStatus::NumericalFailure; out.message="phase-I auxiliary objective was incorrectly reported unbounded"; return finish(); }
+        if(status!=LPStatus::Optimal) { out.status=status; out.message=simplexFailure.empty()?"phase I did not find a feasible basis":simplexFailure; return finish(); }
         double artificialSum=0.0;
         for(std::size_t i=0;i<R;++i) if(artificial[basis[i]]) artificialSum+=std::max(0.0,xB[i]);
         if(artificialSum>tol_.feasibility*(1.0+std::accumulate(s.b.begin(),s.b.end(),0.0,[](double a,double b){return a+std::abs(b);}))) {
-            out.status=LPStatus::Infeasible; out.message="phase I found no feasible basis"; return out;
+            out.status=LPStatus::Infeasible; out.message="phase I found no feasible basis"; return finish();
         }
         // Replace zero artificial basics with any available real or slack column.
         for(std::size_t row=0;row<R;++row) if(artificial[basis[row]]) {
@@ -629,10 +634,10 @@ private:
             }
             if(replacement<artificialStart) { basic[basis[row]]=false; basis[row]=replacement; basic[replacement]=true; }
         }
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="sparse basis factorization failed after phase I";return out;}
+        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="sparse basis factorization failed after phase I";return finish();}
         std::size_t phaseTwoIterations=0; out.status=simplex(false,limit,phaseTwoIterations); out.iterations+=phaseTwoIterations;
-        if(out.status!=LPStatus::Optimal) { out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return out; }
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="final sparse basis refactorization failed";return out;}
+        if(out.status!=LPStatus::Optimal) { out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return finish(); }
+        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="final sparse basis refactorization failed";return finish();}
         std::vector<double> z(n,0.0);
         for(std::size_t i=0;i<R;++i) if(basis[i]<n) z[basis[i]]=std::max(0.0,xB[i]);
         out.solution.primal.assign(m.variables.size(),0.0);
@@ -640,10 +645,10 @@ private:
         for(std::size_t i=0;i<m.variables.size();++i) if(m.variables[i].active&&std::isfinite(m.variables[i].lower)) out.solution.primal[i]+=m.variables[i].lower;
         out.objectiveValue=evaluateObjective(m,out.solution.primal); out.solution.objectiveValue=out.objectiveValue; out.solution.feasibilityResidual=verifyResidual(m,out.solution.primal);
         if(!std::isfinite(out.objectiveValue)||verifyScaledResidual(m,out.solution.primal)>std::max(100.0*tol_.feasibility,1e-7)) {
-            out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return out;
+            out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return finish();
         }
         out.basisVariables=basis;
-        return out;
+        return finish();
     }
     static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c,std::vector<std::size_t>&nonzeroColumns){
         auto& pivotRow=t[r];const double inverse=1.0/pivotRow[c];
