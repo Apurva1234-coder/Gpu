@@ -251,8 +251,8 @@ async function refreshSolverRoute(selection = state.modelSequence) {
   state.routePreview = null; button.disabled = true; button.textContent = "CHECKING EXECUTION ROUTE…";
   if (state.selectedMethod === "auto") {
     if (selection !== state.modelSequence || jobId !== state.jobId || sequence !== state.routeRequestSequence) return;
-    state.routePreview = {backend:"AUTO",reason:"An installed compatible solver is tried first. Its result is independently verified and the engine is named; Sovereign native methods remain selectable."};
-    host.innerHTML = `<div class="route-config-grid"><div><span>PROBLEM</span><b>${escapeHtml(state.analysis.problem_type)}</b></div><div><span>ALGORITHM</span><b>Auto engine selection</b></div><div><span>COMPUTE BACKEND</span><b>AUTOMATIC</b></div></div><p>${escapeHtml(state.routePreview.reason)}</p>`;
+    state.routePreview = {backend:"AUTO",reason:"Sovereign selects an in-house algorithm for this problem type. External solvers are used only when you open the separate comparison view."};
+    host.innerHTML = `<div class="route-config-grid"><div><span>PROBLEM</span><b>${escapeHtml(state.analysis.problem_type)}</b></div><div><span>ALGORITHM</span><b>Sovereign native auto selection</b></div><div><span>COMPUTE BACKEND</span><b>AUTOMATIC</b></div></div><p>${escapeHtml(state.routePreview.reason)}</p>`;
     button.disabled = false; button.textContent = "START SOLVING  →";
     return;
   }
