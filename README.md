@@ -61,7 +61,7 @@ sovereign_solver/ Python parsing, validation, classification, and presolve packa
 tests/           Python tests
 ```
 
-## Build the C++ solver
+## Primary interface: native CLI
 
 Requirements: a C++17 compiler and CMake 3.16 or newer.
 
@@ -70,11 +70,19 @@ cmake -S cpp_solver -B cpp_solver/build
 cmake --build cpp_solver/build --config Release
 ```
 
-The executable is `cpp_solver/build/sovereign_presolve_cli` (Linux/macOS) or `cpp_solver/build/Release/sovereign_presolve_cli.exe` (Windows multi-configuration generators).
+The executable is `cpp_solver/build/sovereign_presolve_cli` (Linux/macOS) or `cpp_solver/build/Release/sovereign_presolve_cli.exe` (Windows multi-configuration generators). On Windows with the repository's Release Ninja build it is `cpp_solver/build-route-cpu/sovereign_presolve_cli.exe`.
 
-## Run the Sovereign web dashboard
+The CLI is the primary demonstration and execution interface. It parses MPS, JSON, TXT, and supported QPLIB models, detects LP/QP/MILP, runs the selected native solver, and prints solver status, solution metrics, verification, and measured timings. The native QPLIB reader supports diagonal quadratic objectives with linear constraints, matching the current QP solver scope. It has no dependency on the web server, browser, FastAPI, or frontend assets. Example:
 
-The optional local dashboard is a thin FastAPI adapter around the existing C++ executable. It does not implement optimization in Python or JavaScript. A valid upload starts the automatic pipeline: parse, validate, classify, presolve, deterministic solver/backend selection, solve, postsolve, and original-model verification. The central `webui/solver_policy.py` selects only implemented paths: revised simplex for automatic continuous LP, Newton/Barrier for QP, and branch-and-bound for MILP. Expert Mode exposes the implemented manual controls for technical use.
+```powershell
+cpp_solver\build-route-cpu\sovereign_presolve_cli.exe --input datasets\qp\small\QPLIB_9002.qplib --method qp
+```
+
+Use `--method revised-simplex` for LP or `--method milp` for MILP. The build also provides `--help`-style usage text when invoked without required arguments.
+
+## Optional web dashboard
+
+The website is optional and is not required to build or run the solver. It is a thin FastAPI adapter around the existing C++ executable. Its Python imports and frontend assets are used only when explicitly launching the dashboard or running web adapter tests. The central `webui/solver_policy.py` selects revised simplex for automatic continuous LP, Newton/Barrier for QP, and branch-and-bound for MILP.
 
 From the repository root on Windows:
 

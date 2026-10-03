@@ -178,8 +178,37 @@ minimize
         self.assertEqual(len(model.constraints), 1)
         self.assertEqual(sum(len(row.coefficients) for row in model.constraints), 2)
         self.assertEqual(model.quadratic_terms, {"x1": 2.0, "x2": 4.0})
+        self.assertEqual(model.objective_constant, 0.0)
         self.assertEqual(model.bounds["x1"], (0.0, None))
         self.assertEqual(model.bounds["x2"], (None, 5.0))
+
+    def test_qplib_preserves_nonzero_objective_constant(self):
+        content = """QPLIB_OFFSET
+DCL
+minimize
+1
+0
+1
+1 1 2
+0
+0
+5.5
+0
+1e20
+0
+0
+0
+0
+-1e20
+0
+1e20
+0
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "QPLIB_OFFSET.qplib"
+            path.write_text(content, encoding="utf-8")
+            model = parse_problem_file(str(path))
+        self.assertEqual(model.objective_constant, 5.5)
 
     def test_mps_lp(self):
         model = self._parse_mps("""NAME TESTLP

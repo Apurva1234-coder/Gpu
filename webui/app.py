@@ -502,6 +502,15 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "standardization_time_ms": _capture(r"^Standardization time ms:\s*([^\r\n]+)$", output, None, float),
         "solve_pipeline_time_ms": _capture(r"^Solve pipeline time ms:\s*([^\r\n]+)$", output, None, float),
         "solver_time_ms": _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_convexity_check_time_ms": _capture(r"^Convexity check time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_transformation_time_ms": _capture(r"^Transformation time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_scaling_time_ms": _capture(r"^Scaling time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_initialization_time_ms": _capture(r"^Initialization time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_residual_computation_time_ms": _capture(r"^Residual computation time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_newton_assembly_time_ms": _capture(r"^Newton assembly time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_linear_system_build_time_ms": _capture(r"^Linear system build time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_linear_solve_time_ms": _capture(r"^Linear solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_newton_update_time_ms": _capture(r"^Newton update time ms:\s*([^\r\n]+)$", output, None, float),
         "milp_model_preparation_time_ms": _capture(r"^MILP Model Preparation time ms:\s*([^\r\n]+)$", output, None, float),
         "milp_root_lp_time_ms": _capture(r"^Root LP time ms:\s*([^\r\n]+)$", output, None, float),
         "milp_root_lp_standardization_time_ms": _capture(r"^Root LP standardization time ms:\s*([^\r\n]+)$", output, None, float),
@@ -551,6 +560,17 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
             "pruning": timings["milp_pruning_time_ms"],
             "total_solver": timings["milp_total_solver_time_ms"],
         },
+        "qp_stages_ms": {
+            "convexity_check": timings["qp_convexity_check_time_ms"],
+            "transformation": timings["qp_transformation_time_ms"],
+            "scaling": timings["qp_scaling_time_ms"],
+            "initialization": timings["qp_initialization_time_ms"],
+            "residual_computation": timings["qp_residual_computation_time_ms"],
+            "newton_assembly": timings["qp_newton_assembly_time_ms"],
+            "linear_system_build": timings["qp_linear_system_build_time_ms"],
+            "linear_solve": timings["qp_linear_solve_time_ms"],
+            "newton_update": timings["qp_newton_update_time_ms"],
+        },
     }
     names = (_capture(r"^Primal Names:\s*(.*)$", output, "") or "").split()
     primal_line = _capture(r"^Primal:\s*(.*)$", output, "") or ""
@@ -594,6 +614,8 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
     metrics = {
         "objective": _capture(r"^Objective:\s*([^\r\n]+)$", output, None, float),
         "iterations": _capture(r"^Iterations:\s*(\d+)$", output, None, int),
+        "linear_system_solves": _capture(r"^Linear system solves:\s*(\d+)$", output, None, int),
+        "linear_solver_iterations": _capture(r"^PCG iterations:\s*(\d+)$", output, None, int),
         "nodes_created": _capture(r"^Nodes Created:\s*(\d+)$", output, None, int),
         "nodes_processed": _capture(r"^Nodes Processed:\s*(\d+)$", output, None, int),
         "nodes_pruned": _capture(r"^Nodes Pruned:\s*(\d+)$", output, None, int),
@@ -644,7 +666,7 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "relative_gap": _capture(r"^Relative Gap:\s*([^\r\n]+)$", output, None, float),
         "primal_residual": _capture(r"^Primal residual:\s*([^\r\n]+)$", output, None, float),
         "dual_residual": _capture(r"^Dual residual:\s*([^\r\n]+)$", output, None, float),
-        "complementarity_residual": _capture(r"^Complementarity residual:\s*([^\r\n]+)$", output, None, float),
+        "complementarity_residual": _capture(r"^Complementarity(?: residual)?:\s*([^\r\n]+)$", output, None, float),
         "feasibility": _capture(r"^Feasibility:\s*([^\r\n]+)$", output, None, float),
         "iteration_limit": _capture(r"^Iteration limit:\s*(.+)$", output, None),
         "attempt_count": _capture(r"^Attempt count:\s*(\d+)$", output, None, int),
@@ -1062,7 +1084,12 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
             solver = _cuda_solver_path()
         elif requested_backend == "cpu":
             solver = _cpu_solver_path()
-        elif configuration["method"] in {"ipm", "qp"} and info["cuda_available"]:
+        elif configuration["method"] == "qp":
+            # The current QP Newton/Schur path is CPU-based (matrix-free PCG).
+            # Keep Auto honest and avoid starting a CUDA context unless the
+            # user explicitly requests CUDA for a QP run.
+            solver = _cpu_solver_path()
+        elif configuration["method"] == "ipm" and info["cuda_available"]:
             try:
                 solver = _cuda_solver_path()
             except FileNotFoundError:

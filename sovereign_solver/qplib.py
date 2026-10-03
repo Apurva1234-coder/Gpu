@@ -124,7 +124,7 @@ def parse_qplib(text: str) -> Dict[str, Any]:
             objective[f"x{variable}"] = value
         else:
             objective.pop(f"x{variable}", None)
-    reader.number("objective constant")
+    objective_constant = reader.number("objective constant")
 
     coefficients: list[dict[str, float]] = [{} for _ in range(n_constraints)]
     linear_term_count = reader.integer("number of linear constraint terms")
@@ -201,5 +201,5 @@ def parse_qplib(text: str) -> Dict[str, Any]:
             if normalized_upper is not None:
                 constraints.append({"name": f"c{row}_upper", "coefficients": row_coefficients, "operator": "<=", "rhs": normalized_upper})
 
-    return {"name": name, "objective_sense": sense, "variables": variables, "objective": objective,
+    return {"name": name, "objective_sense": sense, "objective_constant": objective_constant, "variables": variables, "objective": objective,
             "quadratic_terms": quadratic_terms, "constraints": constraints, "bounds": bounds}

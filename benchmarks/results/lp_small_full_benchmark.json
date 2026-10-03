@@ -1,0 +1,452 @@
+{
+  "schema_version": 1,
+  "scope": "Read-only baseline; no solver changes, build, commit, or push",
+  "git": {
+    "head": "365209b88701d889d74e7e44a5ec20524782dbcf",
+    "worktree_dirty_at_start": true
+  },
+  "dataset": {
+    "name": "AFIRO",
+    "suite": "Netlib LP",
+    "path": "benchmarks/netlib/small/afiro.mps",
+    "format": "MPS",
+    "bytes": 3244,
+    "sha256": "fd3562804ff19382a9cd8bcb22ec81bffd24a4143a2290783831d8c64516a24b",
+    "objective_sense": "minimize"
+  },
+  "selection": {
+    "toy_excluded": {
+      "name": "small.mps",
+      "rows": 2,
+      "columns": 2,
+      "nnz": 4,
+      "bytes": 321
+    },
+    "reason": "artificial toy; user requested real dataset",
+    "afiro2_same_dimensions_larger_file_bytes": 3594
+  },
+  "original_model": {
+    "rows": 27,
+    "columns": 32,
+    "nnz": 83,
+    "density": 0.09606481481481481,
+    "continuous": 32,
+    "integer": 0,
+    "variable_bound_categories": {
+      "free": 0,
+      "lower_only": 32,
+      "upper_only": 0,
+      "double_bounded": 0,
+      "fixed": 0
+    },
+    "constraint_categories": {
+      "equality": 8,
+      "less_equal": 19,
+      "greater_equal": 0,
+      "ranged": 0
+    },
+    "objective_constant": 0.0,
+    "objective_nnz": 5,
+    "objective_coeff_min": -0.6,
+    "objective_coeff_max": 10.0,
+    "abs_matrix_coeff_min_nonzero": 0.107,
+    "abs_matrix_coeff_max": 2.429,
+    "abs_finite_rhs_min": 0.0,
+    "abs_finite_rhs_max": 500.0,
+    "finite_bound_abs_min": 0.0,
+    "finite_bound_abs_max": 0.0
+  },
+  "validation": {
+    "native_parse": "PASS",
+    "python_mps_parse": "PASS",
+    "nonfinite_values": 0,
+    "duplicate_column_row_entries": 0,
+    "bad_bounds": 0,
+    "unknown_row_references": 0,
+    "unsupported_constructs_encountered": 0,
+    "empty_constraint_rows": 0
+  },
+  "classification_and_route": {
+    "type": "LP (inferred from parsed model; CLI does not print explicit type label)",
+    "quadratic_objective": false,
+    "integer_variables": false,
+    "requested_method": "revised-simplex",
+    "selected_method": "REVISED SIMPLEX",
+    "requested_backend": "cpu",
+    "selected_backend": "cpu",
+    "backend_reason": "An explicit backend override was requested.",
+    "cuda_used": false
+  },
+  "build": {
+    "exe": "cpp_solver/build-route-cpu/sovereign_presolve_cli.exe",
+    "bytes": 479232,
+    "timestamp_local": "2026-10-03 13:21:00",
+    "config": "Release",
+    "compiler_toolset": "MSVC 14.29.30133",
+    "flags": "/O2 /Ob2 /DNDEBUG",
+    "generator": "Ninja",
+    "rebuild_performed": false,
+    "reproduction_command_not_run": "cmake --build cpp_solver/build-route-cpu --target sovereign_presolve_cli"
+  },
+  "configuration": {
+    "threads": "not exposed",
+    "feasibility_tolerance": 1E-08,
+    "optimality_tolerance": 1E-08,
+    "iteration_limit": 10000,
+    "time_limit": "none",
+    "presolve": true,
+    "scaling": {
+      "enabled": true,
+      "method": "one row max-norm pass then one column max-norm pass",
+      "scale_ranges": "not instrumented"
+    },
+    "warm_start": false,
+    "pivot_and_refactorization_policy": "not reported for dense route",
+    "standardized": {
+      "rows": 35,
+      "columns": 32,
+      "nnz": 117,
+      "dense_memory_estimate_bytes": 81400,
+      "dense_memory_budget_bytes": 268435456,
+      "guard_triggered": false
+    },
+    "peak_rss": null
+  },
+  "presolve": {
+    "original": {
+      "rows": 27,
+      "columns": 32,
+      "nnz": 83
+    },
+    "presolved": {
+      "rows": 25,
+      "columns": 32,
+      "nnz": 81
+    },
+    "removed": {
+      "rows": 2,
+      "columns": 0,
+      "nnz": 2
+    },
+    "reduction_percent": {
+      "rows": 7.407407407407407,
+      "columns": 0.0,
+      "nnz": 2.4096385542168677
+    },
+    "operations": {
+      "fixed_variables": 0,
+      "singleton_reductions": 2,
+      "bound_tightenings": 2,
+      "substitutions": 0,
+      "eliminated_variables": 0,
+      "redundant_rows": 0,
+      "empty_rows": null,
+      "empty_columns": null,
+      "attempt_counts": null
+    },
+    "passes": 2,
+    "bound_changes_recorded": 2,
+    "objective_offset": 0.0,
+    "history_sizes": null,
+    "remaining_constraint_categories": null,
+    "presolved_space_objective": null
+  },
+  "sovereign_runs": [
+    {
+      "run": 1,
+      "parse_ms": 0.7804,
+      "presolve_ms": 0.1228,
+      "standardization_ms": 0.0684,
+      "solver_ms": 0.1264,
+      "pipeline_ms": 0.1948,
+      "postsolve_ms": 0.0008,
+      "verification_ms": 0.002,
+      "cli_wall_ms": 25.4605,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 2,
+      "parse_ms": 0.812,
+      "presolve_ms": 0.1274,
+      "standardization_ms": 0.0697,
+      "solver_ms": 0.1246,
+      "pipeline_ms": 0.1943,
+      "postsolve_ms": 0.0009,
+      "verification_ms": 0.0025,
+      "cli_wall_ms": 15.9947,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 3,
+      "parse_ms": 0.6991,
+      "presolve_ms": 0.1443,
+      "standardization_ms": 0.0719,
+      "solver_ms": 0.1279,
+      "pipeline_ms": 0.1998,
+      "postsolve_ms": 0.0007,
+      "verification_ms": 0.0021,
+      "cli_wall_ms": 15.395,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 4,
+      "parse_ms": 1.537,
+      "presolve_ms": 0.1646,
+      "standardization_ms": 0.0988,
+      "solver_ms": 0.1756,
+      "pipeline_ms": 0.2744,
+      "postsolve_ms": 0.0013,
+      "verification_ms": 0.0037,
+      "cli_wall_ms": 19.0226,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 5,
+      "parse_ms": 0.784,
+      "presolve_ms": 0.1279,
+      "standardization_ms": 0.0712,
+      "solver_ms": 0.151,
+      "pipeline_ms": 0.2222,
+      "postsolve_ms": 0.0009,
+      "verification_ms": 0.0021,
+      "cli_wall_ms": 16.4435,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 6,
+      "parse_ms": 1.2377,
+      "presolve_ms": 0.1568,
+      "standardization_ms": 0.0816,
+      "solver_ms": 0.1278,
+      "pipeline_ms": 0.2094,
+      "postsolve_ms": 0.0008,
+      "verification_ms": 0.0022,
+      "cli_wall_ms": 17.0808,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 7,
+      "parse_ms": 0.7416,
+      "presolve_ms": 0.1208,
+      "standardization_ms": 0.0706,
+      "solver_ms": 0.1222,
+      "pipeline_ms": 0.1928,
+      "postsolve_ms": 0.0008,
+      "verification_ms": 0.0021,
+      "cli_wall_ms": 16.8591,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 8,
+      "parse_ms": 0.8444,
+      "presolve_ms": 0.1645,
+      "standardization_ms": 0.1021,
+      "solver_ms": 0.1774,
+      "pipeline_ms": 0.2795,
+      "postsolve_ms": 0.0013,
+      "verification_ms": 0.0032,
+      "cli_wall_ms": 16.3734,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 9,
+      "parse_ms": 0.7472,
+      "presolve_ms": 0.1085,
+      "standardization_ms": 0.0744,
+      "solver_ms": 0.124,
+      "pipeline_ms": 0.1984,
+      "postsolve_ms": 0.0009,
+      "verification_ms": 0.0023,
+      "cli_wall_ms": 17.1722,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    },
+    {
+      "run": 10,
+      "parse_ms": 0.7218,
+      "presolve_ms": 0.1219,
+      "standardization_ms": 0.0679,
+      "solver_ms": 0.1396,
+      "pipeline_ms": 0.2075,
+      "postsolve_ms": 0.001,
+      "verification_ms": 0.0023,
+      "cli_wall_ms": 15.1545,
+      "iterations": 16,
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "independent_objective": -464.75314285714285,
+      "max_constraint_violation": 5.684341886080802E-14,
+      "max_bound_violation": 0,
+      "verification": "PASS"
+    }
+  ],
+  "timing_distribution_ms": {
+    "sovereign_solver_only": {
+      "min": 0.1222,
+      "median": 0.12785,
+      "mean": 0.13965,
+      "max": 0.1774,
+      "sample_stdev": 0.021281878
+    },
+    "sovereign_cli_wall": {
+      "min": 15.1545,
+      "median": 16.6513,
+      "mean": 17.49563,
+      "max": 25.4605,
+      "sample_stdev": 2.9993584
+    }
+  },
+  "no_presolve_ablation": {
+    "runs": 1,
+    "standardized_rows": 35,
+    "standardized_columns": 32,
+    "standardized_nnz": 117,
+    "iterations": 16,
+    "solver_ms": 0.1336,
+    "pipeline_ms": 0.2071,
+    "objective": -464.75314285714285,
+    "verification": "PASS",
+    "interpretation": "single run; not sufficient to claim timing benefit"
+  },
+  "references": {
+    "HiGHS": {
+      "version": "1.15.1",
+      "threads": 1,
+      "presolve": "default/on",
+      "method": "automatic simplex route",
+      "status": "kOptimal",
+      "objective": -464.75314285714285,
+      "iterations": 6,
+      "solver_reported_median_ms": 0.6264,
+      "optimize_wall_median_ms": 0.6449,
+      "model_read_wall_median_ms": 0.35865,
+      "presolve_status": "kReduced",
+      "presolved_dimensions": null,
+      "run_wall_median_max_ms": 1.311,
+      "fresh_python_process_wall_ms": {
+        "min": 326.7419,
+        "median": 330.0122,
+        "mean": 332.58284,
+        "max": 346.6877,
+        "sample_stdev": 8.22271374
+      }
+    },
+    "Gurobi": {
+      "version": "13.0.3",
+      "threads": 1,
+      "presolve": "default/on",
+      "method": "automatic",
+      "status": "OPTIMAL",
+      "objective": -464.75314285714285,
+      "iterations": 2,
+      "solver_reported_ms": 0,
+      "reported_timer_resolution": "rounded to zero",
+      "optimize_wall_median_ms": 0.3346,
+      "model_read_wall_median_ms": 0.41985,
+      "presolved_dimensions": {
+        "rows": 6,
+        "columns": 9,
+        "nnz": 26
+      },
+      "license": "restricted/non-production; model fits",
+      "fresh_python_process_wall_ms": {
+        "min": 179.386,
+        "median": 184.5286,
+        "mean": 185.96268,
+        "max": 196.8417,
+        "sample_stdev": 7.01355924
+      }
+    },
+    "CPLEX": "not installed",
+    "GLPK": "not found",
+    "CLP": "command alias only; no executable found",
+    "SCIP": "not found"
+  },
+  "objective_comparison": {
+    "Sovereign": -464.75314285714285,
+    "HiGHS": -464.75314285714285,
+    "Gurobi": -464.75314285714285,
+    "absolute_differences": {
+      "HiGHS": 0,
+      "Gurobi": 0
+    }
+  },
+  "environment": {
+    "os": "Windows NT 10.0.26200.0",
+    "cpu": "AMD64 Family 25 Model 68 Stepping 1, AuthenticAMD",
+    "logical_processors": 16,
+    "ram_bytes": 16989736960,
+    "gpu_used": false
+  },
+  "verification": {
+    "cli_original_model": "PASS",
+    "independent_original_objective": "PASS",
+    "max_original_constraint_violation": 5.684341886080802E-14,
+    "max_original_bound_violation": 0,
+    "dual_residual": null,
+    "reduced_cost_residual": null,
+    "complementarity": null
+  },
+  "limitations": [
+    "native CLI does not separately time classification or process startup",
+    "no LP scaling-off option",
+    "presolve attempts and row identities not emitted",
+    "phase I/II and dense pivot/refactorization telemetry unavailable",
+    "HiGHS exact presolved dimensions unavailable from used API",
+    "peak process RSS unavailable",
+    "reference API timings exclude interpreter/process startup and are not directly comparable to fresh native CLI wall time"
+  ]
+}

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <regex>
+#include <tuple>
 #include <unordered_set>
 #include <chrono>
 namespace sovereign {
@@ -87,12 +88,45 @@ inline Model parseJSON(const std::string& path){
     auto section=[&](const std::string&k){auto p=s.find("\""+k+"\"");if(p==std::string::npos)return std::string();p=s.find('[',p);auto q=s.find(']',p);return s.substr(p,q-p+1);};
     const std::string number="[-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?";
     std::string obj=section("objective");std::regex osec("\\\"objective\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch om;if(std::regex_search(s,om,osec))obj=om[1].str();std::regex kv("\\\"([^\"]+)\\\"\\s*:\\s*("+number+")");for(std::sregex_iterator i(obj.begin(),obj.end(),kv),e;i!=e;++i)for(size_t j=0;j<m.variables.size();++j)if(m.variables[j].name==(*i)[1])m.objective[j]=parseNumber((*i)[2]);
-    std::regex cr("\\{\\s*\\\"name\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"coefficients\\\"\\s*:\\s*\\{([^}]*)\\}.*?\\\"operator\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"rhs\\\"\\s*:\\s*("+number+")",std::regex::icase);for(std::sregex_iterator i(s.begin(),s.end(),cr),e;i!=e;++i){Constraint c;c.originalId=m.constraints.size();c.name=(*i)[1];c.relation=(*i)[3]=="<="?Relation::LessEqual:(*i)[3]==">="?Relation::GreaterEqual:Relation::Equal;c.rhs=parseNumber((*i)[4]);for(std::sregex_iterator j((*i)[2].first,(*i)[2].second,kv),z;j!=z;++j)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*j)[1])c.coefficients[n]=parseNumber((*j)[2]);m.constraints.push_back(c);}std::regex qsec("\\\"quadratic_terms\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch qmatch;if(std::regex_search(s,qmatch,qsec))for(std::sregex_iterator i(qmatch[1].first,qmatch[1].second,kv),e;i!=e;++i)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*i)[1])m.quadratic[n]=parseNumber((*i)[2]);std::regex bsec("\\\"bounds\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch bmatch;if(std::regex_search(s,bmatch,bsec)){std::regex bound("\\\"([^\"]+)\\\"\\s*:\\s*\\[\\s*(null|"+number+")\\s*,\\s*(null|"+number+")\\s*\\]",std::regex::icase);for(std::sregex_iterator i(bmatch[1].first,bmatch[1].second,bound),e;i!=e;++i)for(auto& v:m.variables)if(v.name==(*i)[1]){if((*i)[2]!="null")v.lower=parseNumber((*i)[2]);else v.lower=-INF;if((*i)[3]!="null")v.upper=parseNumber((*i)[3]);else v.upper=INF;}}m.rebuildMappings();return m;
+    std::regex cr("\\{\\s*\\\"name\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"coefficients\\\"\\s*:\\s*\\{([^}]*)\\}.*?\\\"operator\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"rhs\\\"\\s*:\\s*("+number+")",std::regex::icase);for(std::sregex_iterator i(s.begin(),s.end(),cr),e;i!=e;++i){Constraint c;c.originalId=m.constraints.size();c.name=(*i)[1];c.relation=(*i)[3]=="<="?Relation::LessEqual:(*i)[3]==">="?Relation::GreaterEqual:Relation::Equal;c.rhs=parseNumber((*i)[4]);for(std::sregex_iterator j((*i)[2].first,(*i)[2].second,kv),z;j!=z;++j)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*j)[1])c.coefficients[n]=parseNumber((*j)[2]);m.constraints.push_back(c);}std::regex qsec("\\\"quadratic_terms\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch qmatch;if(std::regex_search(s,qmatch,qsec))for(std::sregex_iterator i(qmatch[1].first,qmatch[1].second,kv),e;i!=e;++i)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*i)[1])m.quadratic[n]=parseNumber((*i)[2]);std::smatch constantMatch;std::regex constantSection("\"objective_constant\"\\s*:\\s*("+number+")");if(std::regex_search(s,constantMatch,constantSection))m.objectiveConstant=parseNumber(constantMatch[1]);std::regex bsec("\\\"bounds\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch bmatch;if(std::regex_search(s,bmatch,bsec)){std::regex bound("\\\"([^\"]+)\\\"\\s*:\\s*\\[\\s*(null|"+number+")\\s*,\\s*(null|"+number+")\\s*\\]",std::regex::icase);for(std::sregex_iterator i(bmatch[1].first,bmatch[1].second,bound),e;i!=e;++i)for(auto& v:m.variables)if(v.name==(*i)[1]){if((*i)[2]!="null")v.lower=parseNumber((*i)[2]);else v.lower=-INF;if((*i)[3]!="null")v.upper=parseNumber((*i)[3]);else v.upper=INF;}}m.rebuildMappings();return m;
+}
+inline Model parseQPLIB(const std::string& path){
+    std::ifstream file(path);if(!file)throw std::runtime_error("cannot open input: "+path);
+    std::vector<std::string> lines;std::string line;
+    while(std::getline(file,line)){auto comment=line.find('#');if(comment!=std::string::npos)line.resize(comment);std::istringstream in(line);std::string value;while(in>>value)lines.push_back(value);}
+    std::size_t pos=0;
+    auto take=[&](const char* label)->std::string{if(pos>=lines.size())throw std::runtime_error(std::string("invalid QPLIB input: missing ")+label);return lines[pos++];};
+    auto number=[&](const char* label){const auto token=take(label);if(token=="1.79769313486232E+308"||token=="1.79769313486232e+308")return std::numeric_limits<double>::max();if(token=="-1.79769313486232E+308"||token=="-1.79769313486232e+308")return -std::numeric_limits<double>::max();std::size_t used=0;double value;try{value=std::stod(token,&used);}catch(...){throw std::runtime_error(std::string("invalid QPLIB ")+label+": "+token);}if(used!=token.size()||!std::isfinite(value))throw std::runtime_error(std::string("invalid QPLIB ")+label+": "+token);return value;};
+    auto integer=[&](const char* label){double value=number(label);if(value<0||value>static_cast<double>(std::numeric_limits<std::size_t>::max())||std::floor(value)!=value)throw std::runtime_error(std::string("invalid QPLIB ")+label);return static_cast<std::size_t>(value);};
+    auto fields=[&](const char* label){auto a=integer(label),b=integer(label);double v=number(label);return std::tuple<std::size_t,std::size_t,double>{a,b,v};};
+    Model model;model.name=take("problem name");if(model.name.rfind("QPLIB",0)!=0)throw std::runtime_error("invalid QPLIB problem name");
+    const auto type=take("problem type");if(type.empty()||std::toupper(static_cast<unsigned char>(type.back()))!='L')throw std::runtime_error("unsupported QPLIB model: only linear constraints are supported");
+    const auto sense=take("objective sense");if(sense=="minimize"||sense=="min")model.sense=Sense::Minimize;else if(sense=="maximize"||sense=="max")model.sense=Sense::Maximize;else throw std::runtime_error("invalid QPLIB objective sense");
+    const auto n=integer("variable count"),m=integer("constraint count");if(n==0)throw std::runtime_error("invalid QPLIB dimensions");
+    model.variables.reserve(n);for(std::size_t j=0;j<n;++j)model.variables.push_back({j,j,"x"+std::to_string(j+1),VariableType::Continuous,-INF,INF,true});
+    const auto qCount=integer("quadratic objective term count");
+    for(std::size_t k=0;k<qCount;++k){auto [i,j,v]=fields("quadratic objective term");if(i<1||i>n||j<1||j>n)throw std::runtime_error("QPLIB quadratic term index out of range");if(i!=j)throw std::runtime_error("unsupported QPLIB off-diagonal Hessian term");model.quadratic[i-1]+=v;}
+    const double defaultObjective=number("default linear objective coefficient");if(defaultObjective)for(std::size_t j=0;j<n;++j)model.objective[j]=defaultObjective;
+    const auto cCount=integer("linear objective override count");for(std::size_t k=0;k<cCount;++k){auto i=integer("linear objective index");double v=number("linear objective coefficient");if(i<1||i>n)throw std::runtime_error("QPLIB objective index out of range");if(v)model.objective[i-1]=v;else model.objective.erase(i-1);}
+    model.objectiveConstant=number("objective constant");
+    std::vector<std::unordered_map<std::size_t,double>> rows(m);const auto aCount=integer("linear constraint term count");
+    for(std::size_t k=0;k<aCount;++k){auto [i,j,v]=fields("linear constraint term");if(i<1||i>m||j<1||j>n)throw std::runtime_error("QPLIB constraint term index out of range");if(v)rows[i-1][j-1]+=v;}
+    const double infinity=std::abs(number("infinity sentinel"));if(infinity==0)throw std::runtime_error("invalid QPLIB infinity sentinel");
+    auto readVector=[&](const char* label,std::size_t count){std::vector<double> values(count,number(label));auto overrides=integer(label);for(std::size_t k=0;k<overrides;++k){auto i=integer(label);double v=number(label);if(i<1||i>count)throw std::runtime_error(std::string("QPLIB ")+label+" index out of range");values[i-1]=v;}return values;};
+    auto lower=readVector("constraint lower bound",m),upper=readVector("constraint upper bound",m);
+    auto readBounds=[&](const char* label){std::vector<double> values(n,number(label));auto overrides=integer(label);for(std::size_t k=0;k<overrides;++k){auto i=integer(label);double v=number(label);if(i<1||i>n)throw std::runtime_error(std::string("QPLIB ")+label+" index out of range");values[i-1]=v;}return values;};
+    auto variableLower=readBounds("variable lower bound"),variableUpper=readBounds("variable upper bound");
+    auto finiteBound=[&](double value,int direction){const double threshold=infinity*0.999;if(direction<0&&value<=-threshold)return -INF;if(direction>0&&value>=threshold)return INF;return value;};
+    for(std::size_t j=0;j<n;++j){model.variables[j].lower=finiteBound(variableLower[j],-1);model.variables[j].upper=finiteBound(variableUpper[j],1);if(model.variables[j].lower>model.variables[j].upper)throw std::runtime_error("inconsistent QPLIB variable bounds");}
+    for(std::size_t i=0;i<m;++i){double lo=finiteBound(lower[i],-1),hi=finiteBound(upper[i],1);if(lo==-INF&&hi==INF)continue;
+      auto add=[&](Relation relation,double rhs,const char* suffix){Constraint c;c.originalId=model.constraints.size();c.name="c"+std::to_string(i+1)+suffix;c.coefficients=rows[i];c.relation=relation;c.rhs=rhs;model.constraints.push_back(std::move(c));};
+      if(lo==hi)add(Relation::Equal,lo,"");else{if(lo!=-INF)add(Relation::GreaterEqual,lo,"_lower");if(hi!=INF)add(Relation::LessEqual,hi,"_upper");}}
+    model.rebuildMappings();return model;
 }
 inline Model parseInput(const std::string& path,
                         const std::chrono::steady_clock::time_point* deadline=nullptr){
     std::ifstream f(path);if(!f)throw std::runtime_error("cannot open input: "+path);
-    std::string line; bool json=false, mps=false;
+    std::string line; bool json=false, mps=false, qplib=false;
     while(std::getline(f,line)) {
         const auto first=line.find_first_not_of(" \t\r\n"); if(first==std::string::npos)continue;
         if(line[first]=='*'||line[first]=='#')continue;
@@ -100,9 +134,10 @@ inline Model parseInput(const std::string& path,
         std::istringstream in(line.substr(first)); std::string token; in>>token;
         for(char& c:token)c=static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         mps=(token=="NAME"||token=="ROWS"||token=="OBJSENSE");
+        qplib=token.rfind("QPLIB",0)==0;
         break;
     }
-    if(mps)return parseMPS(path,deadline);if(json)return parseJSON(path);return parseText(path);
+    if(mps)return parseMPS(path,deadline);if(json)return parseJSON(path);if(qplib)return parseQPLIB(path);return parseText(path);
 }
 }
 
