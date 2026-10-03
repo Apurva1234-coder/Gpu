@@ -25,7 +25,7 @@ struct LPRelaxationResult {
     std::size_t fractionalIntegerVariables=0;
 };
 inline Model relaxMILP(const Model& source){Model r=source;for(auto&v:r.variables){v.type=VariableType::Continuous;if(source.variables[v.originalId].type==VariableType::Binary){v.lower=std::max(0.0,v.lower);v.upper=std::min(1.0,v.upper);}}r.rebuildMappings();return r;}
-inline bool isIntegralWithinTolerance(const Model& m,const std::vector<double>& x,double tol=1e-8){for(const auto&v:m.variables)if((v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<x.size()&&std::abs(x[v.originalId]-std::round(x[v.originalId]))>tol)return false;return true;}
+inline bool isIntegralWithinTolerance(const Model& m,const std::vector<double>& x,double tol=1e-8){for(const auto&v:m.variables)if(v.active&&(v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<x.size()&&std::abs(x[v.originalId]-std::round(x[v.originalId]))>tol)return false;return true;}
 inline LPRelaxationResult solveLPRelaxation(
         const Model& milp, const Model& relaxedLP, LPMethod method=LPMethod::RevisedSimplex,
         std::size_t limit=10000, const std::chrono::steady_clock::time_point* deadline=nullptr,
@@ -56,7 +56,7 @@ inline LPRelaxationResult solveLPRelaxation(
     r.sparseRefactorizations=s.sparseRefactorizations;
     r.sparsePivots=s.sparsePivots;
     r.warmStartAttempted=s.warmStartAttempted;r.warmStartAccepted=s.warmStartAccepted;r.basisVariables=s.basisVariables;r.warmStartState=s.warmStartState;
-    for(const auto&v:milp.variables)if((v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<r.solution.size()&&std::abs(r.solution[v.originalId]-std::round(r.solution[v.originalId]))>1e-8)++r.fractionalIntegerVariables;
+    for(const auto&v:milp.variables)if(v.active&&(v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<r.solution.size()&&std::abs(r.solution[v.originalId]-std::round(r.solution[v.originalId]))>1e-8)++r.fractionalIntegerVariables;
     r.fractionalSolution=r.fractionalIntegerVariables>0;r.integralWithinTolerance=!r.fractionalSolution;
     return r;
 }

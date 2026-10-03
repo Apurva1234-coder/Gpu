@@ -54,7 +54,7 @@ public:
         std::size_t repeatedRounds = 0;
         std::vector<std::size_t> ints;
         for (const auto& v : original.variables)
-            if (v.type == VariableType::Integer || v.type == VariableType::Binary)
+            if (v.active && (v.type == VariableType::Integer || v.type == VariableType::Binary))
                 ints.push_back(v.originalId);
         for (std::size_t it = 0; it < maxIterations_; ++it) {
             if (activeDeadline && std::chrono::steady_clock::now() >= *activeDeadline) {
@@ -162,6 +162,7 @@ private:
     static bool verify(const Model& m, const std::vector<double>& x, double t) {
         if (!finite(x)) return false;
         for (const auto& v : m.variables) {
+            if (!v.active) continue;
             if (v.originalId >= x.size() || x[v.originalId] < v.lower - t || (std::isfinite(v.upper) && x[v.originalId] > v.upper + t)) return false;
             if ((v.type == VariableType::Integer || v.type == VariableType::Binary) && std::abs(x[v.originalId] - std::round(x[v.originalId])) > t) return false;
         }

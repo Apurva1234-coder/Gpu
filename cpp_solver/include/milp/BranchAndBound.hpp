@@ -2,6 +2,7 @@
 #include "milp/LPRelaxation.hpp"
 #include "milp/FeasibilityPump.hpp"
 #include "milp/CuttingPlane.hpp"
+#include "presolve/Postsolve.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -84,6 +85,8 @@ struct MILPResult {
     std::size_t peakOpenNodes = 0;
     std::size_t maxDepth = 0;
     double rootLPTimeMs = 0.0;
+    double rootLPBound = 0.0;
+    bool hasRootLPBound = false;
     double rootLPStandardizationTimeMs = 0.0;
     double rootLPSparsePricingTimeMs = 0.0;
     double rootLPSparseBasisSolveTimeMs = 0.0;
@@ -126,6 +129,43 @@ public:
         return result;
     }
 
+    MILPResult solve(const Model& original, const PresolveResult& presolved,
+                     LPMethod method = LPMethod::RevisedSimplex) const {
+        const auto solveStart = std::chrono::steady_clock::now();
+        if (presolved.status == PresolveStatus::Infeasible) {
+            MILPResult result;
+            result.status = MILPStatus::Infeasible;
+            result.message = "integer-aware presolve proved the model infeasible";
+            result.totalSolverTimeMs = elapsedMs(solveStart);
+            return result;
+        }
+        MILPResult result = solveInternal(presolved.model, method);
+        if (result.incumbentFound) {
+            Solution reducedSolution;
+            reducedSolution.primal = result.solution;
+            Solution restored = postsolve(original, presolved, reducedSolution);
+            result.solution = std::move(restored.primal);
+            result.objective = evaluateObjective(original, result.solution);
+            result.primalBound = result.objective;
+            result.verified = verify(original, result.solution, tol_);
+            if (result.status == MILPStatus::Optimal && !result.verified) {
+                result.status = MILPStatus::NumericalFailure;
+                result.message = "postsolved incumbent failed original-model verification";
+            }
+            if (result.status == MILPStatus::Optimal && result.verified) {
+                result.dualBound = result.objective;
+                result.hasDualBound = true;
+                result.absoluteGap = 0.0;
+                result.relativeGap = 0.0;
+            } else if (result.hasDualBound) {
+                result.absoluteGap = std::abs(result.primalBound - result.dualBound);
+                result.relativeGap = result.absoluteGap / std::max(1.0, std::abs(result.primalBound));
+            }
+        }
+        result.totalSolverTimeMs = elapsedMs(solveStart);
+        return result;
+    }
+
 private:
     MILPResult solveInternal(const Model& original, LPMethod method) const {
         const auto solveStart = std::chrono::steady_clock::now();
@@ -140,8 +180,8 @@ private:
         MILPResult out;
         bool min = original.sense == Sense::Minimize;
         std::size_t originalNonzeros=0;
-        for(const auto& row:original.constraints)originalNonzeros+=row.coefficients.size();
-        const bool smallMILP=original.variables.size()<=100&&original.constraints.size()<=100&&originalNonzeros<=10000;
+        for(const auto& row:original.constraints)if(row.active)originalNonzeros+=row.coefficients.size();
+        const bool smallMILP=activeVariableCount(original)<=100&&activeConstraintCount(original)<=100&&originalNonzeros<=10000;
         const bool useWarmStarts=enableWarmStarts_&&smallMILP;
         double incumbent = min ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity();
 
@@ -180,7 +220,7 @@ private:
             relaxation.objectiveValue=evaluateObjective(original,relaxation.solution);
             relaxation.bound=relaxation.objectiveValue;
             relaxation.fractionalIntegerVariables=0;
-            for(const auto& v:original.variables)if((v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<relaxation.solution.size()&&std::abs(relaxation.solution[v.originalId]-std::round(relaxation.solution[v.originalId]))>tol_)++relaxation.fractionalIntegerVariables;
+            for(const auto& v:original.variables)if(v.active&&(v.type==VariableType::Integer||v.type==VariableType::Binary)&&v.originalId<relaxation.solution.size()&&std::abs(relaxation.solution[v.originalId]-std::round(relaxation.solution[v.originalId]))>tol_)++relaxation.fractionalIntegerVariables;
             relaxation.fractionalSolution=relaxation.fractionalIntegerVariables>0;
             relaxation.integralWithinTolerance=!relaxation.fractionalSolution;
         };
@@ -204,10 +244,17 @@ private:
         const auto rootLPStart = std::chrono::steady_clock::now();
         rootLPModel=relaxMILP(rootModel);
         const auto rootStandardizationStart=std::chrono::steady_clock::now();
-        StandardLP preparedRootLP=standardize(rootLPModel);
-        const double preparedRootStandardizationMs=elapsedMs(rootStandardizationStart);
-        auto initialRelaxation = solveLPRelaxation(rootModel, rootLPModel, method, lpIterationLimit_, deadline, nullptr, useWarmStarts, &preparedRootLP);
+        StandardLP preparedRootLP;
+        const StandardLP* preparedRootLPPtr=nullptr;
+        if(denseLPWithinMemoryBudget(rootLPModel)){
+            preparedRootLP=standardize(rootLPModel);
+            preparedRootLPPtr=&preparedRootLP;
+        }
+        const double preparedRootStandardizationMs=preparedRootLPPtr?elapsedMs(rootStandardizationStart):0.0;
+        auto initialRelaxation = solveLPRelaxation(rootModel, rootLPModel, method, lpIterationLimit_, deadline, nullptr, useWarmStarts, preparedRootLPPtr);
         out.rootLPTimeMs = elapsedMs(rootLPStart);
+        out.rootLPBound = initialRelaxation.bound;
+        out.hasRootLPBound = initialRelaxation.status == LPStatus::Optimal;
         out.rootLPMethod = initialRelaxation.method;
         out.rootLPIterations = initialRelaxation.iterations;
         out.rootLPStandardizationTimeMs = preparedRootStandardizationMs+initialRelaxation.standardizationTimeMs;
@@ -271,6 +318,7 @@ private:
             ++out.rootRoundingHeuristicAttempts;
             auto rounded=initialRelaxation.solution;
             for(const auto& variable:original.variables) {
+                if(!variable.active)continue;
                 if(variable.type!=VariableType::Integer&&variable.type!=VariableType::Binary)continue;
                 if(variable.originalId>=rounded.size())continue;
                 double lower=variable.lower,upper=variable.upper;
@@ -373,7 +421,7 @@ private:
             if (lr.status != LPStatus::Optimal) {
                 const auto nodeLPStart = std::chrono::steady_clock::now();
                 const LPWarmStartState* warmState=useWarmStarts&&node.warmStartState?node.warmStartState.get():nullptr;
-                lr = solveLPRelaxation(original, nodeModel, method, lpIterationLimit_, deadline, warmState, useWarmStarts, &preparedRootLP);
+                lr = solveLPRelaxation(original, nodeModel, method, lpIterationLimit_, deadline, warmState, useWarmStarts, preparedRootLPPtr);
                 out.nodeLPTimeMs += elapsedMs(nodeLPStart);
                 if(lr.status==LPStatus::Optimal)restoreIsolated(lr);
                 ++out.lpSolves;
@@ -460,7 +508,7 @@ private:
             bool integerFeasible = true;
             std::vector<std::size_t> fractionalCandidates;
             for (const auto& v : original.variables) {
-                if ((v.type == VariableType::Integer || v.type == VariableType::Binary) && v.originalId < lr.solution.size()) {
+                if (v.active && (v.type == VariableType::Integer || v.type == VariableType::Binary) && v.originalId < lr.solution.size()) {
                     double val = lr.solution[v.originalId];
                     double dist = std::abs(val - std::round(val));
                     if (dist > tol_) {
@@ -610,6 +658,7 @@ private:
 
     static bool verify(const Model& m, const std::vector<double>& x, double t) {
         for (const auto& v : m.variables) {
+            if (!v.active) continue;
             if (v.originalId >= x.size() || x[v.originalId] < v.lower - t ||
                 (std::isfinite(v.upper) && x[v.originalId] > v.upper + t)) {
                 return false;
@@ -620,6 +669,7 @@ private:
             }
         }
         for (const auto& c : m.constraints) {
+            if (!c.active) continue;
             double a = 0;
             for (auto q : c.coefficients) {
                 a += q.second * x[q.first];
