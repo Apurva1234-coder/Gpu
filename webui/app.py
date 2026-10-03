@@ -46,6 +46,22 @@ ACTIVE_SOLVER_PROCESS: subprocess.Popen[str] | None = None
 ACTIVE_SOLVER_JOB_ID: str | None = None
 
 
+def _configured_solver_path(environment_variable: str, candidates: list[Path], missing_message: str) -> Path:
+    configured = os.environ.get(environment_variable)
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        path = path.resolve()
+        if path.is_file():
+            return path
+        raise FileNotFoundError(f"{environment_variable} points to a missing solver executable: {path}")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(missing_message)
+
+
 def _cpu_solver_path() -> Path:
     candidates = [
         ROOT / "cpp_solver" / "build-route-cpu" / "sovereign_presolve_cli.exe",
@@ -54,10 +70,11 @@ def _cpu_solver_path() -> Path:
         ROOT / "cpp_solver" / "build" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build" / "sovereign_presolve_cli",
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError("C++ solver executable was not found. Build cpp_solver before starting the web UI.")
+    return _configured_solver_path(
+        "SOVEREIGN_SOLVER_EXECUTABLE",
+        candidates,
+        "C++ solver executable was not found. Build cpp_solver before starting the web UI.",
+    )
 
 
 def _cuda_solver_path() -> Path:
@@ -68,10 +85,11 @@ def _cuda_solver_path() -> Path:
         ROOT / "cpp_solver" / "build-cuda" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build-cuda" / "sovereign_presolve_cli",
     ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError("CUDA solver executable was not found. Build cpp_solver with SOVEREIGN_ENABLE_CUDA=ON.")
+    return _configured_solver_path(
+        "SOVEREIGN_CUDA_SOLVER_EXECUTABLE",
+        candidates,
+        "CUDA solver executable was not found. Build cpp_solver with SOVEREIGN_ENABLE_CUDA=ON.",
+    )
 
 
 def _solver_path(prefer_cuda: bool = False) -> Path:
@@ -1494,6 +1512,95 @@ def benchmarks() -> dict[str, Any]:
         except (OSError, json.JSONDecodeError):
             datasets.append({"dataset": suite_name, "metadata": {}, "instances": [], "error": "Benchmark report could not be read."})
     return {"datasets": datasets, "comparators": comparator_availability()}
+
+
+@app.get("/api/benchmarks/final")
+def final_benchmark_reports() -> dict[str, Any]:
+    """Read checked-in final benchmark artifacts without running any solver."""
+    optimization_path = ROOT / "benchmarks" / "results" / "LP_MILP_FINAL_OPTIMIZATION_20261003.json"
+    general_path = ROOT / "benchmarks" / "results" / "FINAL_SOLVER_BENCHMARK_20261003.json"
+    try:
+        optimization = json.loads(optimization_path.read_text(encoding="utf-8"))
+        general = json.loads(general_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"available": False, "records": [], "message": f"Stored final benchmark artifacts could not be read: {exc}"}
+
+    records: list[dict[str, Any]] = []
+    lp = optimization.get("lp_results", {}).get("AFIRO", {})
+    lp_after = lp.get("after", {})
+    lp_before_dims = lp_after.get("input_dimensions", {})
+    lp_reduced_dims = lp_after.get("presolved_dimensions", {})
+    if lp_after:
+        records.append({
+            "dataset": "AFIRO", "problem_type": "LP", "status": lp_after.get("status"),
+            "verification": lp_after.get("verification"), "objective": lp_after.get("objective"),
+            "dimensions": {"variables": lp_before_dims.get("variables"), "constraints": lp_before_dims.get("constraints"), "nonzeros": lp_before_dims.get("nonzeros")},
+            "presolved_dimensions": {"variables": lp_reduced_dims.get("variables"), "constraints": lp_reduced_dims.get("constraints"), "nonzeros": lp_reduced_dims.get("nonzeros")},
+            "algorithm": "Revised Simplex", "backend": "CPU", "solver_time_ms": lp_after.get("median_solver_ms"),
+            "wall_time_ms": lp_after.get("median_cli_wall_ms"), "iterations": lp_after.get("iterations"),
+            "source": optimization_path.relative_to(ROOT).as_posix(), "source_revision": optimization.get("source_revision_at_start"),
+        })
+
+    milp = optimization.get("milp_controlled_comparison", {})
+    milp_result = milp.get("presolve_on", {}).get("summary", {})
+    milp_dims = milp.get("model_sizes", {})
+    if milp_result:
+        records.append({
+            "dataset": milp.get("dataset", "FLUGPL"), "problem_type": "MILP", "status": "OPTIMAL" if milp_result.get("status_all_optimal") else None,
+            "verification": "PASS" if milp_result.get("verification_all_pass") else "N/A", "objective": float(milp_result["objective"]) if milp_result.get("objective") is not None else None,
+            "dimensions": {
+                "variables": milp_dims.get("original", {}).get("variables"),
+                "constraints": milp_dims.get("original", {}).get("rows", milp_dims.get("original", {}).get("constraints")),
+                "nonzeros": milp_dims.get("original", {}).get("nonzeros", milp_dims.get("original", {}).get("nnz")),
+            },
+            "presolved_dimensions": {
+                "variables": milp_dims.get("presolved", {}).get("variables"),
+                "constraints": milp_dims.get("presolved", {}).get("rows", milp_dims.get("presolved", {}).get("constraints")),
+                "nonzeros": milp_dims.get("presolved", {}).get("nonzeros", milp_dims.get("presolved", {}).get("nnz")),
+            },
+            "algorithm": "Branch-and-Bound", "backend": "CPU", "solver_time_ms": milp_result.get("median_solver_ms"),
+            "wall_time_ms": milp_result.get("median_wall_ms"), "iterations": None, "nodes_processed": milp_result.get("median_nodes_processed"),
+            "lp_solves": milp_result.get("median_lp_solves"), "lp_iterations": milp_result.get("median_lp_iterations"),
+            "first_incumbent_node": milp_result.get("median_first_incumbent_node"), "first_incumbent_time_ms": milp_result.get("median_first_incumbent_ms"),
+            "best_bound": milp_result.get("median_root_bound"), "relative_gap": milp_result.get("median_relative_gap"),
+            "source": optimization_path.relative_to(ROOT).as_posix(), "source_revision": optimization.get("source_revision_at_start"),
+        })
+
+    qp = optimization.get("validation", {}).get("qp_regression", {})
+    if qp:
+        records.append({
+            "dataset": Path(str(qp.get("dataset", "QPLIB_9002"))).stem, "problem_type": "QP", "status": qp.get("status"),
+            "verification": qp.get("verification"), "objective": qp.get("objective"),
+            "dimensions": {"variables": qp.get("variables"), "constraints": qp.get("constraints"), "nonzeros": qp.get("linear_nonzeros")},
+            "algorithm": "Newton / Barrier", "backend": "CPU", "solver_time_ms": qp.get("solver_ms"),
+            "wall_time_ms": qp.get("wall_ms"), "iterations": qp.get("newton_iterations"),
+            "primal_residual": qp.get("primal_residual"), "dual_residual": qp.get("dual_residual"),
+            "complementarity": qp.get("complementarity"), "source": optimization_path.relative_to(ROOT).as_posix(),
+            "source_revision": optimization.get("source_revision_at_start"),
+        })
+
+    for key in ("traininstance2", "supportcase6"):
+        item = optimization.get("milp_additional_diagnostics", {}).get(key, {})
+        if item:
+            records.append({
+                "dataset": item.get("dataset", key), "problem_type": "MILP", "status": item.get("status"),
+                "verification": "N/A", "objective": None,
+                "dimensions": {"variables": item.get("variables"), "constraints": item.get("constraints"), "nonzeros": item.get("nonzeros")},
+                "presolved_dimensions": {"variables": item.get("presolved_variables"), "constraints": item.get("presolved_constraints")},
+                "algorithm": item.get("root_lp_method"), "backend": "CPU", "solver_time_ms": None,
+                "wall_time_ms": item.get("wall_ms"), "iterations": item.get("root_lp_iterations"),
+                "root_lp_iterations": item.get("root_lp_iterations"),
+                "nodes_processed": item.get("nodes_processed"), "lp_solves": item.get("lp_solves"),
+                "source": optimization_path.relative_to(ROOT).as_posix(), "source_revision": optimization.get("source_revision_at_start"),
+            })
+
+    return {
+        "available": bool(records), "date": optimization.get("measurement_date"),
+        "source_revision": optimization.get("source_revision_at_start"),
+        "general_benchmark_date": general.get("date"), "records": records,
+        "source_files": [optimization_path.relative_to(ROOT).as_posix(), general_path.relative_to(ROOT).as_posix()],
+        "message": "Stored benchmark measurements; this page does not rerun the solver suite.",
+    }
 
 
 @app.delete("/api/benchmarks/{dataset}")
