@@ -1,4 +1,5 @@
 #include "milp/BranchAndBound.hpp"
+#include "presolve/Presolver.hpp"
 #include <cassert>
 
 using namespace sovereign;
@@ -33,6 +34,8 @@ int main() {
     assert(unlimited.verified);
     assert(unlimited.objective == 0.0);
     assert(unlimited.rootLPTimeMs > 0.0);
+    assert(unlimited.hasRootLPBound);
+    assert(std::abs(unlimited.rootLPBound - 0.5) < 1e-8);
     assert(unlimited.rootLPIterations > 0);
     assert(unlimited.branchAndBoundTimeMs > 0.0);
     assert(unlimited.totalSolverTimeMs >= unlimited.rootLPTimeMs);
@@ -98,5 +101,39 @@ int main() {
     assert(reduced.solution.size() == variableCount);
     assert(reduced.solution[0] == 0.0);
     assert(reduced.solution[variableCount - 1] == 0.0);
+
+    Model presolveModel;
+    presolveModel.name = "integer-aware MILP presolve and postsolve";
+    presolveModel.sense = Sense::Minimize;
+    presolveModel.variables = {{0, 0, "i", VariableType::Integer, 0, 10, true},
+                               {1, 1, "y", VariableType::Continuous, 0, 10, true}};
+    presolveModel.objective[0] = 3.0;
+    presolveModel.objective[1] = 1.0;
+    Constraint fixInteger; fixInteger.originalId=0; fixInteger.name="fix_i";
+    fixInteger.coefficients[0]=1.0; fixInteger.relation=Relation::Equal; fixInteger.rhs=2.0;
+    presolveModel.constraints.push_back(fixInteger);
+    Constraint capacity; capacity.originalId=1; capacity.name="capacity";
+    capacity.coefficients[0]=1.0; capacity.coefficients[1]=1.0;
+    capacity.relation=Relation::GreaterEqual; capacity.rhs=3.0;
+    presolveModel.constraints.push_back(capacity);
+    presolveModel.rebuildMappings();
+    auto presolved=Presolver{}.run(presolveModel,true);
+    assert(presolved.stats.fixedVariables==1);
+    assert(!presolved.model.variables[0].active);
+    auto presolvedResult=BranchAndBound{1e-8,0}.solve(presolveModel,presolved);
+    assert(presolvedResult.status==MILPStatus::Optimal&&presolvedResult.verified);
+    assert(std::abs(presolvedResult.objective-7.0)<1e-8);
+    assert(std::abs(presolvedResult.solution[0]-2.0)<1e-8);
+    assert(std::abs(presolvedResult.solution[1]-1.0)<1e-8);
+
+    Model presolveInfeasible;
+    presolveInfeasible.variables.push_back({0,0,"i",VariableType::Integer,0,10,true});
+    Constraint noIntegerPoint; noIntegerPoint.coefficients[0]=1.0;
+    noIntegerPoint.relation=Relation::Equal; noIntegerPoint.rhs=1.5;
+    presolveInfeasible.constraints.push_back(noIntegerPoint);
+    auto infeasiblePresolve=Presolver{}.run(presolveInfeasible,true);
+    assert(infeasiblePresolve.status==PresolveStatus::Infeasible);
+    assert(BranchAndBound{}.solve(presolveInfeasible,infeasiblePresolve).status==MILPStatus::Infeasible);
+
     return 0;
 }

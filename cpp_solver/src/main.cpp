@@ -162,7 +162,7 @@ int main(int argc,char** argv){
   if(gpu.available()&&selectedBackend==cuda::Backend::CUDA)cuda::Context::setDefault(&gpu);
   auto cls=classify(model);
   auto presolveStart=std::chrono::steady_clock::now();
-  auto red=presolveEnabled?Presolver({},10,cls.type==ProblemType::LP?presolveTimeBudgetMs:0.0,cls.type==ProblemType::LP).run(model):PresolveResult{model};
+  auto red=presolveEnabled?Presolver({},10,cls.type==ProblemType::LP?presolveTimeBudgetMs:0.0,cls.type==ProblemType::LP).run(model,cls.type==ProblemType::MILP):PresolveResult{model};
   double presolveMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presolveStart).count();
   LPMethod method=LPMethod::RevisedSimplex;
   for(int i=3;i+1<argc;++i)if(std::string(argv[i])=="--method"){std::string x=argv[i+1];if(x=="dual-simplex")method=LPMethod::DualSimplex;else if(x=="ipm")method=LPMethod::IPM;else if(x=="pdhg")method=LPMethod::PDHG;}
@@ -187,7 +187,7 @@ int main(int argc,char** argv){
           const double elapsedBeforeMILP = std::chrono::duration<double, std::milli>(solveStart - processStart).count();
           remainingMILPTimeMs = std::max(0.0, milpTimeLimitMs - elapsedBeforeMILP);
       }
-      auto s = BranchAndBound{1e-8, maxNodes, maxIterations, remainingMILPTimeMs, milpWarmStart}.solve(model, lpMethod);
+      auto s = BranchAndBound{1e-8, maxNodes, maxIterations, remainingMILPTimeMs, milpWarmStart}.solve(model, red, lpMethod);
       if (auto* context = cuda::Context::defaultContext()) context->synchronize();
       double solveMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - solveStart).count();
       const bool hasCandidate = s.incumbentFound && !s.solution.empty();
@@ -223,6 +223,7 @@ int main(int argc,char** argv){
           << "\nStatus: " << status << "\nSolve time ms: " << solveMs
           << "\nMILP Model Preparation time ms: " << parseMs + presolveMs
           << "\nRoot LP time ms: " << s.rootLPTimeMs
+          << "\nRoot LP bound: " << optionalMetric(s.rootLPBound, s.hasRootLPBound)
           << "\nRoot LP method: " << s.rootLPMethod
           << "\nRoot LP iterations: " << s.rootLPIterations
           << "\nRoot LP standardization time ms: " << s.rootLPStandardizationTimeMs

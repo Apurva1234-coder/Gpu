@@ -11,7 +11,7 @@ class Presolver {
 public:
     explicit Presolver(Tolerance tolerance = {}, std::size_t maxPasses = 10, double timeBudgetMs = 0.0, bool adaptive = false)
         : tol_(tolerance), maxPasses_(maxPasses), timeBudgetMs_(timeBudgetMs), adaptive_(adaptive) {}
-    PresolveResult run(Model model) const {
+    PresolveResult run(Model model, bool preserveIntegerSemantics = false) const {
         const auto runStart = std::chrono::steady_clock::now();
         PresolveResult result{std::move(model)};
         bool changed = false;
@@ -39,10 +39,10 @@ public:
             const auto before = result.stats;
             std::size_t nonzerosRemoved = 0;
             result.stats.passes = pass; changed = false;
-            if (tighten(result.model, result.stats, result.history)) changed = true;
-            const bool foundContradiction = contradiction(result.model);
+            if (tighten(result.model, result.stats, result.history, preserveIntegerSemantics)) changed = true;
+            const bool foundContradiction = contradiction(result.model, preserveIntegerSemantics);
             if (!foundContradiction) {
-                if (substitute(result.model, result.stats, result.history, nonzerosRemoved)) changed = true;
+                if (substitute(result.model, result.stats, result.history, nonzerosRemoved, preserveIntegerSemantics)) changed = true;
                 if (fixed(result.model, result.stats, result.history, nonzerosRemoved)) changed = true;
                 if (removeRedundant(result.model, result.stats, result.history)) changed = true;
                 if (singleton(result.model, result.stats, nonzerosRemoved)) changed = true;
@@ -85,7 +85,7 @@ public:
 private:
     Tolerance tol_; std::size_t maxPasses_; double timeBudgetMs_; bool adaptive_; static constexpr std::size_t adaptiveWorkThreshold_ = 2000;
     static double value(const std::unordered_map<std::size_t,double>& a, std::size_t i) { auto it=a.find(i); return it==a.end()?0.0:it->second; }
-    bool tighten(Model& m, PresolveStats& s, ReductionHistory& h) const {
+    bool tighten(Model& m, PresolveStats& s, ReductionHistory& h, bool preserveIntegerSemantics) const {
         bool changed=false;
         for (const auto& row:m.constraints) if (row.active && row.coefficients.size()==1) {
             auto entry=row.coefficients.begin(); std::size_t i=entry->first; double a=entry->second; if (std::abs(a)<=tol_.zero) continue; double x=row.rhs/a;
@@ -93,10 +93,30 @@ private:
             if(row.relation==Relation::Equal) l=std::max(l,x),u=std::min(u,x);
             else if((row.relation==Relation::LessEqual && a>0)||(row.relation==Relation::GreaterEqual && a<0)) u=std::min(u,x);
             else l=std::max(l,x);
+            const auto type=m.variables[i].type;
+            const bool integral=preserveIntegerSemantics&&(type==VariableType::Integer||type==VariableType::Binary);
+            if(integral){
+                if(row.relation==Relation::Equal){l=std::max(oldL,std::ceil(x-tol_.feasibility));u=std::min(oldU,std::floor(x+tol_.feasibility));}
+                else if((row.relation==Relation::LessEqual && a>0)||(row.relation==Relation::GreaterEqual && a<0))u=std::min(oldU,std::floor(x+tol_.feasibility));
+                else l=std::max(oldL,std::ceil(x-tol_.feasibility));
+                if(type==VariableType::Binary){l=std::max(l,0.0);u=std::min(u,1.0);}
+            }
             if(l>oldL+tol_.bound||u<oldU-tol_.bound){ if(l>oldL+tol_.bound)m.variables[i].lower=l; if(u<oldU-tol_.bound)m.variables[i].upper=u; h.bounds.push_back({m.variables[i].originalId,oldL,oldU,m.variables[i].lower,m.variables[i].upper}); ++s.boundTightenings;changed=true; }
         } return changed;
     }
-    bool contradiction(const Model& m) const { for(const auto& v:m.variables) if(v.lower>v.upper+tol_.feasibility) return true; return infeasibleRows(m); }
+    bool contradiction(const Model& m, bool preserveIntegerSemantics) const {
+        for(const auto& v:m.variables) if(v.active){
+            if(v.lower>v.upper+tol_.feasibility)return true;
+            if(preserveIntegerSemantics&&(v.type==VariableType::Integer||v.type==VariableType::Binary)){
+                double lower=v.lower,upper=v.upper;
+                if(v.type==VariableType::Binary){lower=std::max(lower,0.0);upper=std::min(upper,1.0);}
+                if(std::isfinite(lower))lower=std::ceil(lower-tol_.feasibility);
+                if(std::isfinite(upper))upper=std::floor(upper+tol_.feasibility);
+                if(lower>upper)return true;
+            }
+        }
+        return infeasibleRows(m);
+    }
     bool infeasibleRows(const Model& m) const { for(const auto& r:m.constraints) if(r.active && r.coefficients.empty() && !satisfies(0,r.relation,r.rhs)) return true; return false; }
     bool satisfies(double x, Relation r, double b) const { return r==Relation::Equal?std::abs(x-b)<=tol_.feasibility:r==Relation::LessEqual?x<=b+tol_.feasibility:x>=b-tol_.feasibility; }
     bool fixed(Model& m, PresolveStats& s, ReductionHistory& h, std::size_t& nonzerosRemoved) const {
@@ -109,7 +129,7 @@ private:
         for(auto i:gone){double x=m.variables[i].lower;h.fixed.push_back({m.variables[i].originalId,x});m.objectiveConstant+=value(m.objective,i)*x+value(m.quadratic,i)*x*x;m.objective.erase(i);m.quadratic.erase(i);for(auto row:variableRows[i]){auto& r=m.constraints[row];if(!r.active)continue;auto coefficient=r.coefficients.find(i);if(coefficient!=r.coefficients.end()){r.rhs-=coefficient->second*x;r.coefficients.erase(coefficient);++nonzerosRemoved;}}m.variables[i].active=false;++s.fixedVariables;++s.eliminatedVariables;}m.rebuildMappings();
         return true;
     }
-    bool substitute(Model& m, PresolveStats& s, ReductionHistory& h, std::size_t& nonzerosRemoved) const {
+    bool substitute(Model& m, PresolveStats& s, ReductionHistory& h, std::size_t& nonzerosRemoved, bool preserveIntegerSemantics) const {
         for (auto& row : m.constraints) {
             if (!row.active || row.relation != Relation::Equal || row.coefficients.size() != 2) continue;
             auto a = row.coefficients.begin(); auto b = std::next(a);
@@ -117,6 +137,9 @@ private:
             std::size_t eliminated = a->first, retained = b->first;
             double ca = a->second, cb = b->second;
             if (std::abs(ca) <= tol_.zero || !m.variables[eliminated].active || !m.variables[retained].active) continue;
+            // Eliminating an integer variable can turn its integrality condition
+            // into a hidden congruence constraint. Keep such columns intact.
+            if(preserveIntegerSemantics&&m.variables[eliminated].type!=VariableType::Continuous)continue;
             double constant = row.rhs / ca, multiplier = -cb / ca;
             if (m.variables[eliminated].lower != 0 || std::isfinite(m.variables[eliminated].upper)) continue;
             for (auto& r : m.constraints) if (r.active && r.originalId != row.originalId) {
