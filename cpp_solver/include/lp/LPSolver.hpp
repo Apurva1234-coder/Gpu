@@ -6,10 +6,14 @@
 #include "core/LinearSystem.hpp"
 #include "core/numerical/Vector.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -25,13 +29,76 @@ inline const char* methodName(LPMethod m) { return m==LPMethod::RevisedSimplex?"
 // pivot factorization implicit in the dictionary (no external optimizer).
 struct StandardLP {
     std::vector<std::vector<double>> A; std::vector<double> b, c;
+    std::vector<double> rowScale;
     std::vector<std::pair<std::size_t,double>> map; // internal variable -> original variable, scale
     double constant{}; bool maximize{};
+    std::size_t structureHash{};
 };
+
+constexpr std::size_t DenseLPMemoryBudgetBytes = 256ULL * 1024ULL * 1024ULL;
+
+inline long double estimateDenseLPBytes(const Model& model) {
+    std::size_t columns = 0, rows = 0;
+    for (const auto& variable : model.variables) if (variable.active) {
+        columns += std::isfinite(variable.lower) ? 1 : 2;
+        if (std::isfinite(variable.upper)) ++rows;
+    }
+    for (const auto& constraint : model.constraints) if (constraint.active)
+        rows += constraint.relation == Relation::Equal ? 2 : 1;
+    const long double r = static_cast<long double>(rows);
+    const long double n = static_cast<long double>(columns);
+    // Peak can include standard form, tableau, standard matrix, and a basis
+    // matrix simultaneously. Artificial columns are bounded by row count.
+    const long double standardForm = r * n;
+    const long double tableau = (r + 1) * (n + 2 * r + 1);
+    const long double standardMatrix = r * (n + 2 * r);
+    const long double basis = r * r;
+    const long double vectorsAndRowHeaders = 64 * r + 32 * (n + r + 1);
+    return sizeof(double) * (standardForm + tableau + standardMatrix + basis) + vectorsAndRowHeaders;
+}
+
+inline bool denseLPWithinMemoryBudget(const Model& model) {
+    return estimateDenseLPBytes(model) <= static_cast<long double>(DenseLPMemoryBudgetBytes);
+}
+
+inline std::string denseLPMemoryGuardMessage(const Model& model) {
+    const long double estimatedMiB = estimateDenseLPBytes(model) / (1024.0L * 1024.0L);
+    const long double budgetMiB = static_cast<long double>(DenseLPMemoryBudgetBytes) / (1024.0L * 1024.0L);
+    std::ostringstream message;
+    message << "dense LP path refused: estimated peak workspace " << static_cast<double>(estimatedMiB)
+            << " MiB exceeds the " << static_cast<double>(budgetMiB)
+            << " MiB safety budget; use revised-simplex (sparse route) or PDHG";
+    return message.str();
+}
+
+inline std::size_t standardizationStructureHash(const Model& m) {
+    std::size_t hash=static_cast<std::size_t>(1469598103934665603ULL);
+    auto mix=[&](std::size_t value){hash^=value;hash*=static_cast<std::size_t>(1099511628211ULL);};
+    mix(static_cast<std::size_t>(m.sense));mix(m.variables.size());mix(m.constraints.size());mix(m.objective.size());
+    for(const auto& q:m.objective){mix(q.first);mix(std::hash<double>{}(q.second));}
+    for(const auto& v:m.variables){mix(v.originalId);mix(v.active?1:0);mix(std::isfinite(v.lower)?1:0);mix(std::isfinite(v.upper)?1:0);}
+    for(const auto& c:m.constraints){mix(c.originalId);mix(c.active?1:0);mix(static_cast<std::size_t>(c.relation));mix(c.coefficients.size());for(const auto& q:c.coefficients){mix(q.first);mix(std::hash<double>{}(q.second));}}
+    return hash;
+}
+
+inline bool updateStandardRhs(const Model& m,const StandardLP& structure,std::vector<double>& rhs) {
+    if(standardizationStructureHash(m)!=structure.structureHash||structure.rowScale.size()!=structure.A.size())return false;
+    rhs.clear();rhs.reserve(structure.A.size());
+    for(const auto& c:m.constraints)if(c.active){
+        double value=c.rhs;
+        for(const auto& q:c.coefficients)if(q.first<m.variables.size()&&m.variables[q.first].active&&std::isfinite(m.variables[q.first].lower))value-=q.second*m.variables[q.first].lower;
+        if(c.relation==Relation::LessEqual)rhs.push_back(value/structure.rowScale[rhs.size()]);
+        else if(c.relation==Relation::GreaterEqual)rhs.push_back(-value/structure.rowScale[rhs.size()]);
+        else {rhs.push_back(value/structure.rowScale[rhs.size()]);rhs.push_back(-value/structure.rowScale[rhs.size()]);}
+    }
+    for(const auto& v:m.variables)if(v.active&&std::isfinite(v.upper))rhs.push_back((std::isfinite(v.lower)?v.upper-v.lower:v.upper)/structure.rowScale[rhs.size()]);
+    return rhs.size()==structure.A.size();
+}
 
 inline StandardLP standardize(const Model& m, const Tolerance& t={}, bool preserveIntegrality=false) {
     (void)t;
-    StandardLP s; s.maximize=m.sense==Sense::Maximize;
+    if (!preserveIntegrality && !denseLPWithinMemoryBudget(m)) throw std::length_error(denseLPMemoryGuardMessage(m));
+    StandardLP s; s.maximize=m.sense==Sense::Maximize;s.structureHash=standardizationStructureHash(m);
     std::vector<std::size_t> ids;
     for(const auto& v:m.variables) if(v.active) {
         ids.push_back(v.originalId);
@@ -59,9 +126,10 @@ inline StandardLP standardize(const Model& m, const Tolerance& t={}, bool preser
     }
     // Row and column equilibration reduces scale disparities while preserving
     // the original model through the transformed variable map.
+    s.rowScale.assign(s.A.size(),1.0);
     if(!preserveIntegrality) for(std::size_t i=0;i<s.A.size();++i) {
         double scale=0; for(double a:s.A[i]) scale=std::max(scale,std::abs(a));
-        if(scale>0 && std::isfinite(scale)) { for(double& a:s.A[i]) a/=scale; s.b[i]/=scale; }
+        if(scale>0 && std::isfinite(scale)) { s.rowScale[i]=scale;for(double& a:s.A[i]) a/=scale; s.b[i]/=scale; }
     }
     if(!preserveIntegrality) for(std::size_t j=0;j<s.map.size();++j) {
         double scale=0; for(const auto& row:s.A) scale=std::max(scale,std::abs(row[j]));
@@ -159,8 +227,15 @@ inline SparseStandardLP standardizeSparse(const Model& m, const Tolerance& t={})
 class LPSolver {
 public:
     explicit LPSolver(Tolerance t={}):tol_(t){}
-    LPResult solve(const Model& m, LPMethod method=LPMethod::RevisedSimplex, std::size_t limit=10000, const Model* integralityModel=nullptr) const {
+    LPResult solve(const Model& m, LPMethod method=LPMethod::RevisedSimplex, std::size_t limit=10000,
+                   const Model* integralityModel=nullptr,
+                   const std::chrono::steady_clock::time_point* deadline=nullptr,
+                   const LPWarmStartState* initialState=nullptr,
+                   bool retainWarmStartState=true,
+                   const StandardLP* preparedStandard=nullptr) const {
         LPResult out;out.method=methodName(method);
+        out.warmStartAttempted=initialState!=nullptr;
+        out.estimatedDenseMemoryBytes=static_cast<double>(estimateDenseLPBytes(m));
         for(const auto&v:m.variables)if(v.type!=VariableType::Continuous){out.status=LPStatus::Unsupported;out.method=methodName(method);return out;}
         if(!m.quadratic.empty()){out.status=LPStatus::Unsupported;return out;}
         if(!integralityModel) {
@@ -169,23 +244,53 @@ public:
                 transformedVariables+=std::isfinite(v.lower)?1:2;
                 if(std::isfinite(v.upper)) ++standardizedRows;
             }
+            std::size_t constraintNonzeros=0;
             for(const auto& c:m.constraints) if(c.active)
-                standardizedRows+=c.relation==Relation::Equal?2:1;
+                { standardizedRows+=c.relation==Relation::Equal?2:1; constraintNonzeros+=c.coefficients.size(); }
             // Retain the stable tableau implementation for moderate models;
-            // use sparse revised simplex when tableau storage would be large.
+            // use sparse revised simplex for large, very sparse models where
+            // dense tableau updates waste work on structural zeros.
             const long double estimatedEntries=static_cast<long double>(standardizedRows)*
                 (transformedVariables+2*standardizedRows+2);
-            if(estimatedEntries>8.0e6L) return solveSparse(m,method,limit);
+            const long double matrixCells=static_cast<long double>(standardizedRows)*transformedVariables;
+            const long double density=matrixCells>0?constraintNonzeros/matrixCells:1.0L;
+            if(!denseLPWithinMemoryBudget(m)) {
+                LPResult sparse=solveSparse(m,method,limit,deadline);
+                sparse.warmStartAttempted=initialState!=nullptr;
+                sparse.denseMemoryGuardTriggered=true;
+                const std::string solverMessage=sparse.message;
+                sparse.message=denseLPMemoryGuardMessage(m)+"; sparse revised simplex selected";
+                if(!solverMessage.empty()) sparse.message+="; solver detail: "+solverMessage;
+                return sparse;
+            }
+            if(estimatedEntries>8.0e6L || (estimatedEntries>1.0e6L && density<0.0045L) ||
+               (estimatedEntries>1.0e5L && density<0.03L && m.variables.size()<=m.constraints.size()))
+                return solveSparse(m,method,limit,deadline);
         }
-        StandardLP s=standardize(m,tol_,integralityModel!=nullptr); const std::size_t n=s.c.size(), R=s.A.size();
+        if(deadlineExpired(deadline)) { out.status=LPStatus::IterationLimit; out.message="wall-clock time limit reached"; return out; }
+        const auto standardizationStart=std::chrono::steady_clock::now();
+        StandardLP ownedStandard;
+        std::vector<double> preparedRhs;
+        const bool usePrepared=preparedStandard&&updateStandardRhs(m,*preparedStandard,preparedRhs);
+        if(!usePrepared)ownedStandard=standardize(m,tol_,integralityModel!=nullptr);
+        const StandardLP& s=usePrepared?*preparedStandard:ownedStandard;
+        const std::vector<double>& standardB=usePrepared?preparedRhs:s.b;
+        out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();
+        for(const auto& row:s.A)for(double value:row)if(value!=0.0)++out.standardizedNonzeros;
+        out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
+        const std::size_t n=s.c.size(), R=s.A.size();
         if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        const auto denseSetupStart=std::chrono::steady_clock::now();
+#endif
         std::size_t artificialCount=0; std::vector<bool> needsArtificial(R,false);
-        for(std::size_t i=0;i<R;++i) if(s.b[i]<-tol_.feasibility) { needsArtificial[i]=true; ++artificialCount; }
+        for(std::size_t i=0;i<R;++i) if(standardB[i]<-tol_.feasibility) { needsArtificial[i]=true; ++artificialCount; }
         const std::size_t originalAndSlack=n+R, total=originalAndSlack+artificialCount;
         std::vector<std::vector<double>> tab(R+1,std::vector<double>(total+1,0.0));
         std::vector<std::vector<double>> standardMatrix(R,std::vector<double>(total,0.0));
         std::vector<double> standardRhs(R,0.0);
         std::vector<std::size_t> basis(R); std::vector<bool> artificial(total,false);
+        std::vector<unsigned char> basic(total,0);
         std::size_t nextArtificial=originalAndSlack;
         for(std::size_t i=0;i<R;++i) {
             const double sign=needsArtificial[i]?-1.0:1.0;
@@ -193,8 +298,12 @@ public:
             tab[i][n+i]=standardMatrix[i][n+i]=sign;
             if(needsArtificial[i]) { tab[i][nextArtificial]=standardMatrix[i][nextArtificial]=1.0; basis[i]=nextArtificial; artificial[nextArtificial]=true; ++nextArtificial; }
             else basis[i]=n+i;
-            tab[i].back()=standardRhs[i]=sign*s.b[i];
+            basic[basis[i]]=1;
+            tab[i].back()=standardRhs[i]=sign*standardB[i];
         }
+        std::vector<std::size_t> pivotNonzeroColumns;
+        pivotNonzeroColumns.reserve(total+1);
+        const bool trackWarmState=retainWarmStartState||initialState!=nullptr;
         auto setObjective=[&](const std::vector<double>& cost) {
             std::fill(tab[R].begin(),tab[R].end(),0.0);
             for(std::size_t j=0;j<total;++j) tab[R][j]=-cost[j];
@@ -203,16 +312,30 @@ public:
         auto simplex=[&](const std::vector<double>& cost,std::size_t maxIterations,bool allowArtificial,std::size_t& iterations) {
             setObjective(cost);
             for(std::size_t it=0;it<maxIterations;++it) {
-                std::size_t enter=total; double mostNegative=-tol_.optimality;
+                if(deadlineExpired(deadline)) { iterations=it; out.message="wall-clock time limit reached"; return LPStatus::IterationLimit; }
+                std::size_t enter=total; double best=tol_.optimality;
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                const auto pricingStart=std::chrono::steady_clock::now();
+#endif
                 for(std::size_t j=0;j<total;++j) {
-                    bool isBasic=false; for(std::size_t i=0;i<R;++i) if(basis[i]==j) { isBasic=true; break; }
-                    if(isBasic || (!allowArtificial&&artificial[j]) || tab[R][j]>=-tol_.optimality) continue;
-                    if(enter==total || tab[R][j]<mostNegative) { enter=j; mostNegative=tab[R][j]; }
+                    if(basic[j] || (!allowArtificial&&artificial[j]) || tab[R][j]>=-tol_.optimality) continue;
+                    if(-tab[R][j]>best) { enter=j; best=-tab[R][j]; }
                 }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                out.densePricingTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-pricingStart).count();
+#endif
                 if(enter==total) { iterations=it; return LPStatus::Optimal; }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                const auto ratioStart=std::chrono::steady_clock::now();
+#endif
                 double minimumRatio=std::numeric_limits<double>::infinity();
                 for(std::size_t i=0;i<R;++i) if(tab[i][enter]>tol_.pivot) minimumRatio=std::min(minimumRatio,std::max(0.0,tab[i].back())/tab[i][enter]);
-                if(!std::isfinite(minimumRatio)) { iterations=it; return LPStatus::Unbounded; }
+                if(!std::isfinite(minimumRatio)) {
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                    out.denseRatioTestTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-ratioStart).count();
+#endif
+                    iterations=it; return LPStatus::Unbounded;
+                }
                 // Harris two-pass ratio test: preserve feasibility while
                 // preferring a numerically stronger pivot among near ties.
                 std::size_t leave=R; double bestPivot=-1.0;
@@ -221,17 +344,169 @@ public:
                     const double ratio=std::max(0.0,tab[i].back())/tab[i][enter];
                     if(ratio<=relaxed && tab[i][enter]>bestPivot) { leave=i; bestPivot=tab[i][enter]; }
                 }
-                if(leave==R) { iterations=it; return LPStatus::NumericalFailure; }
-                pivot(tab,leave,enter); basis[leave]=enter; iterations=it+1;
+                if(leave==R) {
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                    out.denseRatioTestTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-ratioStart).count();
+#endif
+                    iterations=it; return LPStatus::NumericalFailure;
+                }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                out.denseRatioTestTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-ratioStart).count();
+                const auto pivotStart=std::chrono::steady_clock::now();
+#endif
+                pivot(tab,leave,enter,pivotNonzeroColumns); basic[basis[leave]]=0; basis[leave]=enter; basic[enter]=1; iterations=it+1;
                 for(std::size_t i=0;i<R;++i) if(tab[i].back()<0 && tab[i].back()>-tol_.feasibility*10) tab[i].back()=0;
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+                out.densePivotTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-pivotStart).count();
+#endif
                 if(it+1==maxIterations) return LPStatus::IterationLimit;
             }
             return LPStatus::IterationLimit;
         };
+        std::size_t structureHash=static_cast<std::size_t>(1469598103934665603ULL);
+        auto hashValue=[&](std::size_t value){structureHash^=value;structureHash*=static_cast<std::size_t>(1099511628211ULL);};
+        if(trackWarmState){hashValue(n);hashValue(R);hashValue(total);for(const auto& row:standardMatrix)for(const double value:row)hashValue(std::hash<double>{}(value));}
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        out.denseSetupTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-denseSetupStart).count();
+#endif
+        bool warmStartUsed=false;
+        if(initialState && initialState->modelStructureHash==s.structureHash &&
+           initialState->originalColumnCount==n && initialState->rowCount==R &&
+           initialState->standardRhs.size()==R && initialState->tableau.size()==R+1 &&
+           initialState->basisVariables.size()==R && initialState->basicVariables.size()==total &&
+           initialState->artificialVariables.size()==total) {
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+            const auto warmRebuildStart=std::chrono::steady_clock::now();
+#endif
+            auto candidate=initialState->tableau;
+            auto candidateBasis=initialState->basisVariables;
+            auto candidateBasic=initialState->basicVariables;
+            std::vector<bool> candidateArtificial(total,false);
+            bool valid=true;
+            for(std::size_t j=0;j<total;++j)candidateArtificial[j]=initialState->artificialVariables[j]!=0;
+            for(std::size_t i=0;i<R;++i) {
+                if(candidate[i].size()!=total+1 || candidateBasis[i]>=total || candidateBasic[candidateBasis[i]]==0) {valid=false;break;}
+                const double delta=standardB[i]-initialState->standardRhs[i];
+                if(std::abs(delta)<=tol_.zero)continue;
+                const std::size_t slackColumn=n+i;
+                for(std::size_t k=0;k<=R;++k)candidate[k].back()+=delta*candidate[k][slackColumn];
+            }
+            // A basic artificial variable would make dual-simplex reoptimization
+            // ambiguous for a changed RHS; let the cold phase-I path handle it.
+            for(std::size_t i=0;valid&&i<R;++i)if(candidateArtificial[candidateBasis[i]])valid=false;
+            for(std::size_t j=0;valid&&j<originalAndSlack;++j)
+                if(!candidateBasic[j]&&candidate[R][j]<-tol_.optimality)valid=false;
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+            out.denseWarmBasisRebuildTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmRebuildStart).count();
+#endif
+            if(valid) {
+                tab=std::move(candidate);basis=std::move(candidateBasis);basic=std::move(candidateBasic);artificial=std::move(candidateArtificial);
+                out.warmStartAccepted=true;warmStartUsed=true;
+                std::size_t dualIterations=0;LPStatus dualStatus=LPStatus::Optimal;
+                for(;dualIterations<limit;++dualIterations) {
+                    if(deadlineExpired(deadline)){dualStatus=LPStatus::IterationLimit;out.message="wall-clock time limit reached";break;}
+                    std::size_t leave=R;double mostNegative=-tol_.feasibility;
+                    for(std::size_t i=0;i<R;++i)if(tab[i].back()<mostNegative){mostNegative=tab[i].back();leave=i;}
+                    if(leave==R){dualStatus=LPStatus::Optimal;break;}
+                    std::size_t enter=total;double bestRatio=std::numeric_limits<double>::infinity();double bestPivot=0.0;
+                    for(std::size_t j=0;j<originalAndSlack;++j)if(!basic[j]&&tab[leave][j]<-tol_.pivot) {
+                        const double ratio=std::max(0.0,tab[R][j])/(-tab[leave][j]);
+                        if(ratio<bestRatio-tol_.optimality || (std::abs(ratio-bestRatio)<=tol_.optimality&&-tab[leave][j]>bestPivot)) {
+                            bestRatio=ratio;bestPivot=-tab[leave][j];enter=j;
+                        }
+                    }
+                    if(enter==total){dualStatus=LPStatus::Infeasible;break;}
+                    pivot(tab,leave,enter,pivotNonzeroColumns);basic[basis[leave]]=0;basis[leave]=enter;basic[enter]=1;
+                    for(std::size_t i=0;i<R;++i)if(tab[i].back()<0.0&&tab[i].back()>-10.0*tol_.feasibility)tab[i].back()=0.0;
+                }
+                out.iterations=dualIterations;
+                if(dualStatus!=LPStatus::Optimal) {
+                    out.status=dualStatus;
+                    if(dualStatus==LPStatus::Infeasible)out.message="dual reoptimization proved the child relaxation infeasible";
+                    else if(!deadlineExpired(deadline))out.message="dual reoptimization reached the configured LP iteration limit";
+                    return out;
+                }
+            }
+        }
+        if(!warmStartUsed && initialState&&initialState->structureHash==structureHash&&initialState->basisVariables.size()==R&&
+           initialState->basisVariables.size()>0) {
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+            const auto warmRebuildStart=std::chrono::steady_clock::now();
+#endif
+            std::vector<std::vector<double>> candidate(R+1,std::vector<double>(total+1,0.0));
+            std::vector<std::size_t> candidateBasis=initialState->basisVariables;
+            std::vector<unsigned char> candidateBasic(total,0);
+            bool valid=true;
+            for(const auto column:candidateBasis) {
+                if(column>=originalAndSlack || candidateBasic[column]) { valid=false; break; }
+                candidateBasic[column]=1;
+            }
+            for(std::size_t i=0;i<R;++i) {
+                std::copy(standardMatrix[i].begin(),standardMatrix[i].end(),candidate[i].begin());
+                candidate[i].back()=standardRhs[i];
+            }
+            for(std::size_t k=0;valid&&k<R;++k) {
+                std::size_t pivotRow=k;double magnitude=0.0;
+                for(std::size_t i=k;i<R;++i) {
+                    const double value=std::abs(candidate[i][candidateBasis[k]]);
+                    if(value>magnitude){magnitude=value;pivotRow=i;}
+                }
+                if(magnitude<=tol_.pivot){valid=false;break;}
+                if(pivotRow!=k)std::swap(candidate[pivotRow],candidate[k]);
+                pivot(candidate,k,candidateBasis[k],pivotNonzeroColumns);
+            }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+            out.denseWarmBasisRebuildTimeMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmRebuildStart).count();
+#endif
+            if(valid) {
+                std::vector<double> phaseTwo(total,0.0);
+                for(std::size_t j=0;j<n;++j)phaseTwo[j]=s.c[j];
+                for(std::size_t j=0;j<total;++j)candidate[R][j]=-phaseTwo[j];
+                for(std::size_t i=0;i<R;++i) {
+                    const double cb=phaseTwo[candidateBasis[i]];
+                    if(cb!=0.0)for(std::size_t j=0;j<=total;++j)candidate[R][j]+=cb*candidate[i][j];
+                }
+                for(std::size_t j=0;j<originalAndSlack;++j)
+                    if(!candidateBasic[j]&&candidate[R][j]<-tol_.optimality) { valid=false;break; }
+            }
+            if(valid) {
+                tab=std::move(candidate);basis=std::move(candidateBasis);basic=std::move(candidateBasic);
+                out.warmStartAccepted=true;warmStartUsed=true;
+                std::vector<double> phaseTwo(total,0.0);for(std::size_t j=0;j<n;++j)phaseTwo[j]=s.c[j];
+                setObjective(phaseTwo);
+                std::size_t dualIterations=0;LPStatus dualStatus=LPStatus::Optimal;
+                for(;dualIterations<limit;++dualIterations) {
+                    if(deadlineExpired(deadline)){dualStatus=LPStatus::IterationLimit;out.message="wall-clock time limit reached";break;}
+                    std::size_t leave=R;double mostNegative=-tol_.feasibility;
+                    for(std::size_t i=0;i<R;++i)if(tab[i].back()<mostNegative){mostNegative=tab[i].back();leave=i;}
+                    if(leave==R){dualStatus=LPStatus::Optimal;break;}
+                    std::size_t enter=total;double bestRatio=std::numeric_limits<double>::infinity();double bestPivot=0.0;
+                    for(std::size_t j=0;j<originalAndSlack;++j)if(!basic[j]&&tab[leave][j]<-tol_.pivot) {
+                        const double ratio=std::max(0.0,tab[R][j])/(-tab[leave][j]);
+                        if(ratio<bestRatio-tol_.optimality || (std::abs(ratio-bestRatio)<=tol_.optimality&&-tab[leave][j]>bestPivot)) {
+                            bestRatio=ratio;bestPivot=-tab[leave][j];enter=j;
+                        }
+                    }
+                    if(enter==total){dualStatus=LPStatus::Infeasible;break;}
+                    pivot(tab,leave,enter,pivotNonzeroColumns);basic[basis[leave]]=0;basis[leave]=enter;basic[enter]=1;
+                    for(std::size_t i=0;i<R;++i)if(tab[i].back()<0.0&&tab[i].back()>-10.0*tol_.feasibility)tab[i].back()=0.0;
+                }
+                out.iterations=dualIterations;
+                if(dualStatus!=LPStatus::Optimal) {
+                    out.status=dualStatus;
+                    if(dualStatus==LPStatus::Infeasible)out.message="dual reoptimization proved the child relaxation infeasible";
+                    else if(!deadlineExpired(deadline))out.message="dual reoptimization reached the configured LP iteration limit";
+                    return out;
+                }
+            }
+        }
+        if(warmStartUsed) {
+            out.status=LPStatus::Optimal;
+        } else {
         std::vector<double> phaseOne(total,0.0); for(std::size_t j=0;j<total;++j) if(artificial[j]) phaseOne[j]=-1.0;
         std::size_t phaseOneIterations=0; LPStatus phaseOneStatus=simplex(phaseOne,limit,true,phaseOneIterations);
         out.iterations=phaseOneIterations;
-        if(phaseOneStatus==LPStatus::IterationLimit) { out.status=phaseOneStatus; out.message="phase-I iteration limit"; return out; }
+        if(phaseOneStatus==LPStatus::IterationLimit) { out.status=phaseOneStatus; if(!deadlineExpired(deadline))out.message="phase-I iteration limit"; return out; }
         if(phaseOneStatus!=LPStatus::Optimal || tab[R].back() < -tol_.feasibility*10) { out.status=LPStatus::Infeasible; out.message="phase I found no feasible basis"; return out; }
         // Artificial variables must be fixed at zero in phase II. Pivot them
         // out wherever a real/slack column can replace them; a remaining row
@@ -240,29 +515,53 @@ public:
         for(std::size_t i=0;i<R;++i) if(artificial[basis[i]]) {
             std::size_t replacement=originalAndSlack;
             for(std::size_t j=0;j<originalAndSlack;++j) {
-                bool isBasic=false; for(std::size_t k=0;k<R;++k) if(basis[k]==j) { isBasic=true; break; }
-                if(!isBasic && std::abs(tab[i][j])>tol_.pivot) { replacement=j; break; }
+                if(!basic[j] && std::abs(tab[i][j])>tol_.pivot) { replacement=j; break; }
             }
-            if(replacement<originalAndSlack) { pivot(tab,i,replacement); basis[i]=replacement; }
+            if(replacement<originalAndSlack) { pivot(tab,i,replacement,pivotNonzeroColumns); basic[basis[i]]=0; basis[i]=replacement; basic[replacement]=1; }
         }
         std::vector<double> phaseTwo(total,0.0); for(std::size_t j=0;j<n;++j) phaseTwo[j]=s.c[j];
         std::size_t phaseTwoIterations=0; out.status=simplex(phaseTwo,limit,false,phaseTwoIterations); out.iterations+=phaseTwoIterations;
-        if(out.status!=LPStatus::Optimal) { out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return out; }
-        std::vector<double> basicValues; std::vector<std::vector<double>> basisMatrix(R,std::vector<double>(R,0.0));
-        for(std::size_t i=0;i<R;++i)for(std::size_t j=0;j<R;++j)basisMatrix[i][j]=standardMatrix[i][basis[j]];
-        const bool refactored=LinearSystem::solve(basisMatrix,standardRhs,basicValues,tol_);
-        std::vector<double> z(n,0.0); for(std::size_t i=0;i<R;++i) if(basis[i]<n) z[basis[i]]=std::max(0.0,refactored?basicValues[i]:tab[i].back());
+        if(out.status!=LPStatus::Optimal) { if(!deadlineExpired(deadline))out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return out; }
+        }
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        const auto recoveryStart=std::chrono::steady_clock::now();
+#endif
+        std::vector<double> z(n,0.0); for(std::size_t i=0;i<R;++i) if(basis[i]<n) z[basis[i]]=std::max(0.0,tab[i].back());
         out.solution.primal.assign(m.variables.size(),0);for(size_t j=0;j<n;++j)out.solution.primal[s.map[j].first]+=s.map[j].second*z[j];for(size_t i=0;i<m.variables.size();++i)if(m.variables[i].active&&std::isfinite(m.variables[i].lower))out.solution.primal[i]+=m.variables[i].lower;
         out.objectiveValue=evaluateObjective(m,out.solution.primal);out.solution.objectiveValue=out.objectiveValue;out.solution.feasibilityResidual=verifyResidual(m,out.solution.primal);
+        #if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        out.denseSolutionRecoveryTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-recoveryStart).count();
+        #endif
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        const auto verificationStart=std::chrono::steady_clock::now();
+#endif
         if(!std::isfinite(out.objectiveValue)||verifyScaledResidual(m,out.solution.primal)>std::max(100.0*tol_.feasibility,1e-7)) {
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+            out.denseVerificationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-verificationStart).count();out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return out;
+#else
             out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return out;
+#endif
         }
-        out.basisVariables=basis;for(size_t i=0;i<R;++i)out.basisRows.emplace_back(tab[i].begin(),tab[i].end());for(size_t i=0;i<R;++i){size_t bv=basis[i];if(bv>=n||bv>=s.map.size())continue;size_t original=s.map[bv].first;const Model& im=integralityModel?*integralityModel:m;if(original>=im.variables.size()||(im.variables[original].type!=VariableType::Integer&&im.variables[original].type!=VariableType::Binary))continue;double rhs=tab[i].back(),fr=rhs-std::floor(rhs);if(fr<=tol_.feasibility||fr>=1-tol_.feasibility)continue;std::vector<double> fc(n);double cutRhs=fr;bool valid=true;for(size_t j=0;j<n+R;++j){bool basic=false;for(size_t k=0;k<R;++k)if(basis[k]==j)basic=true;if(basic)continue;double f=tab[i][j]-std::floor(tab[i][j]);if(f<tol_.zero||1-f<tol_.zero)f=0;if(std::abs(f)<=tol_.feasibility)continue;if(j<n)fc[j]+=f;else{size_t row=j-n;if(row>=s.A.size()||std::abs(s.b[row]-std::round(s.b[row]))>tol_.feasibility){valid=false;break;}for(size_t k=0;k<n;++k)if(std::abs(s.A[row][k])>tol_.feasibility){size_t id=s.map[k].first;if(id>=im.variables.size()||im.variables[id].type==VariableType::Continuous||std::abs(s.A[row][k]-std::round(s.A[row][k]))>tol_.feasibility){valid=false;break;}fc[k]-=f*s.A[row][k];}cutRhs-=f*s.b[row];}}
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        out.denseVerificationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-verificationStart).count();
+#endif
+        out.basisVariables=basis;
+        if(retainWarmStartState){auto warmState=std::make_shared<LPWarmStartState>();warmState->basisVariables=basis;warmState->structureHash=structureHash;warmState->tableau=tab;warmState->basicVariables=basic;warmState->artificialVariables.resize(total);for(std::size_t j=0;j<total;++j)warmState->artificialVariables[j]=artificial[j]?1:0;warmState->standardRhs=standardB;warmState->modelStructureHash=s.structureHash;warmState->originalColumnCount=n;warmState->rowCount=R;out.warmStartState=std::move(warmState);}
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        const auto cutStart=std::chrono::steady_clock::now();
+#endif
+        for(size_t i=0;i<R;++i){size_t bv=basis[i];if(bv>=n||bv>=s.map.size())continue;size_t original=s.map[bv].first;const Model& im=integralityModel?*integralityModel:m;if(original>=im.variables.size()||(im.variables[original].type!=VariableType::Integer&&im.variables[original].type!=VariableType::Binary))continue;double rhs=tab[i].back(),fr=rhs-std::floor(rhs);if(fr<=tol_.feasibility||fr>=1-tol_.feasibility)continue;std::vector<double> fc(n);double cutRhs=fr;bool valid=true;for(size_t j=0;j<n+R;++j){if(basic[j])continue;double f=tab[i][j]-std::floor(tab[i][j]);if(f<tol_.zero||1-f<tol_.zero)f=0;if(std::abs(f)<=tol_.feasibility)continue;if(j<n)fc[j]+=f;else{size_t row=j-n;if(row>=s.A.size()||std::abs(standardB[row]-std::round(standardB[row]))>tol_.feasibility){valid=false;break;}for(size_t k=0;k<n;++k)if(std::abs(s.A[row][k])>tol_.feasibility){size_t id=s.map[k].first;if(id>=im.variables.size()||im.variables[id].type==VariableType::Continuous||std::abs(s.A[row][k]-std::round(s.A[row][k]))>tol_.feasibility){valid=false;break;}fc[k]-=f*s.A[row][k];}cutRhs-=f*standardB[row];}}
           if(!valid)continue;GomoryRow gr;gr.sourceVariable=original;gr.coefficients.assign(m.variables.size(),0);double lhs=0;for(size_t j=0;j<n;++j)if(std::abs(fc[j])>tol_.zero){size_t id=s.map[j].first;double scale=s.map[j].second;if(std::abs(scale-1)>tol_.feasibility){valid=false;break;}gr.coefficients[id]+=fc[j];double shift=std::isfinite(m.variables[id].lower)?m.variables[id].lower:0;cutRhs+=fc[j]*shift;lhs+=fc[j]*(out.solution.primal[id]-shift);}if(!valid)continue;gr.rhs=cutRhs;gr.violation=gr.rhs-lhs;if(gr.violation>tol_.feasibility)out.gomoryRows.push_back(std::move(gr));}
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+        out.denseCutTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cutStart).count();
+#endif
         if(out.status==LPStatus::NumericalFailure)out.status=LPStatus::IterationLimit;return out;
     }
 private:
     Tolerance tol_;
+    static bool deadlineExpired(const std::chrono::steady_clock::time_point* deadline) {
+        return deadline && std::chrono::steady_clock::now() >= *deadline;
+    }
     using SparseColumn = std::vector<std::pair<std::size_t,double>>;
     struct SparseLU {
         std::vector<std::unordered_map<std::size_t,double>> rows;
@@ -270,12 +569,17 @@ private:
         std::vector<std::size_t> permutation;
         std::size_t size{};
         std::size_t failedAt{}; double failedPivot{};
-        bool factor(std::vector<std::unordered_map<std::size_t,double>> a, double pivotTolerance) {
+        bool factor(std::vector<std::unordered_map<std::size_t,double>> a, double pivotTolerance,
+                    const std::chrono::steady_clock::time_point* deadline, bool& timeLimitReached) {
             size=a.size(); rows=std::move(a); permutation.resize(size);
             std::iota(permutation.begin(),permutation.end(),0);
             std::vector<std::unordered_set<std::size_t>> columnRows(size);
-            for(std::size_t i=0;i<size;++i)for(const auto& item:rows[i])columnRows[item.first].insert(i);
+            for(std::size_t i=0;i<size;++i){
+                if(deadline && std::chrono::steady_clock::now()>=*deadline){timeLimitReached=true;return false;}
+                for(const auto& item:rows[i])columnRows[item.first].insert(i);
+            }
             for(std::size_t k=0;k<size;++k) {
+                if(deadline && std::chrono::steady_clock::now()>=*deadline){timeLimitReached=true;return false;}
                 std::size_t p=k; double largest=0.0;
                 for(const std::size_t i:columnRows[k]) if(i>=k) { auto it=rows[i].find(k); const double v=it==rows[i].end()?0.0:std::abs(it->second); if(v>largest){largest=v;p=i;} }
                 if(!(largest>pivotTolerance)||!std::isfinite(largest)) {failedAt=k;failedPivot=largest;return false;}
@@ -291,6 +595,7 @@ private:
                 affected.reserve(columnRows[k].size());
                 for(const std::size_t i:columnRows[k])if(i>k)affected.push_back(i);
                 for(const std::size_t i:affected) {
+                    if(deadline && std::chrono::steady_clock::now()>=*deadline){timeLimitReached=true;return false;}
                     auto ik=rows[i].find(k); if(ik==rows[i].end()) continue;
                     const double multiplier=ik->second/pivot; ik->second=multiplier;
                     for(const auto& item:rows[k]) if(item.first>k) {
@@ -303,10 +608,13 @@ private:
                 }
             }
             upperColumns.assign(size,{}); lowerColumns.assign(size,{});
-            for(std::size_t i=0;i<size;++i) for(const auto& item:rows[i]) {
-                const std::size_t j=item.first; const double v=item.second;
-                if(j>i) upperColumns[j].emplace_back(i,v);
-                else if(j<i) lowerColumns[j].emplace_back(i,v);
+            for(std::size_t i=0;i<size;++i) {
+                if(deadline && std::chrono::steady_clock::now()>=*deadline){timeLimitReached=true;return false;}
+                for(const auto& item:rows[i]) {
+                    const std::size_t j=item.first; const double v=item.second;
+                    if(j>i) upperColumns[j].emplace_back(i,v);
+                    else if(j<i) lowerColumns[j].emplace_back(i,v);
+                }
             }
             return true;
         }
@@ -317,20 +625,49 @@ private:
             for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:rows[i])if(item.first>i)x[i]-=item.second*x[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;x[i]/=d->second;if(!std::isfinite(x[i]))return false;}
             return true;
         }
-        bool solveTranspose(const std::vector<double>& b,std::vector<double>& x) const {
-            if(b.size()!=size)return false;std::vector<double> z=b;
-            for(std::size_t i=0;i<size;++i){for(const auto& item:upperColumns[i])z[i]-=item.second*z[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;z[i]/=d->second;}
-            for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:lowerColumns[i])z[i]-=item.second*z[item.first];}
-            x.assign(size,0.0);for(std::size_t i=0;i<size;++i)x[permutation[i]]=z[i];
+        bool solveTranspose(const std::vector<double>& b,std::vector<double>& x,std::vector<double>& work) const {
+            if(b.size()!=size)return false;work.assign(b.begin(),b.end());
+            for(std::size_t i=0;i<size;++i){for(const auto& item:upperColumns[i])work[i]-=item.second*work[item.first];auto d=rows[i].find(i);if(d==rows[i].end()||d->second==0.0)return false;work[i]/=d->second;}
+            for(std::size_t ii=0;ii<size;++ii){const std::size_t i=size-1-ii;for(const auto& item:lowerColumns[i])work[i]-=item.second*work[item.first];}
+            x.resize(size);std::fill(x.begin(),x.end(),0.0);for(std::size_t i=0;i<size;++i)x[permutation[i]]=work[i];
             return std::all_of(x.begin(),x.end(),[](double v){return std::isfinite(v);});
         }
     };
     struct EtaUpdate { std::size_t row; std::vector<double> direction; };
-    LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit) const {
+    LPResult solveSparse(const Model& m, LPMethod method, std::size_t limit,
+                         const std::chrono::steady_clock::time_point* deadline) const {
         LPResult out; out.method=methodName(method);
+        out.estimatedDenseMemoryBytes=static_cast<double>(estimateDenseLPBytes(m));
+        double pricingMs=0.0,basisSolveMs=0.0,devexMs=0.0,factorizationMs=0.0,ratioTestMs=0.0,lexicographicMs=0.0;
+        std::size_t refactorizations=0,pivots=0,lexicographicSolves=0;
+        bool blandFallbackTriggered=false;
+        struct SparseMetricsScope {
+            LPResult& result; double& pricing; double& basis; double& devex; double& factorization; double& ratio; double& lexicographic;
+            std::size_t& refactorizations; std::size_t& pivots; std::size_t& lexicographicSolves; bool& blandFallbackTriggered;
+            void publish() {
+                result.sparsePricingTimeMs=pricing; result.sparseBasisSolveTimeMs=basis;
+                result.sparseDevexTimeMs=devex; result.sparseFactorizationTimeMs=factorization;
+                result.sparseRatioTestTimeMs=ratio; result.sparseLexicographicTimeMs=lexicographic;
+                result.sparseRefactorizations=refactorizations; result.sparsePivots=pivots;
+                result.sparseLexicographicSolves=lexicographicSolves;
+                result.sparseBlandFallbackTriggered=blandFallbackTriggered;
+            }
+            ~SparseMetricsScope() { publish(); }
+        } metricsScope{out,pricingMs,basisSolveMs,devexMs,factorizationMs,ratioTestMs,lexicographicMs,refactorizations,pivots,lexicographicSolves,blandFallbackTriggered};
+        // Explicitly publish before returning by value. Return-value moves can
+        // happen before local destructors run, which otherwise dropped all
+        // sparse stage timings and counters from the returned LPResult.
+        auto finish=[&](){metricsScope.publish();return out;};
+        auto addElapsed=[](double& target,const std::chrono::steady_clock::time_point& start) {
+            target+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        };
+        const auto standardizationStart=std::chrono::steady_clock::now();
         SparseStandardLP s=standardizeSparse(m,tol_);
+        out.standardizedRows=s.A.size(); out.standardizedColumns=s.c.size();
+        for(const auto& row:s.A)out.standardizedNonzeros+=row.size();
+        out.standardizationTimeMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-standardizationStart).count();
         const std::size_t n=s.c.size(), R=s.A.size();
-        if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return out; }
+        if(n==0) { out.status=LPStatus::NumericalFailure; out.message="LP has no active transformed variables"; return finish(); }
         std::vector<bool> needsArtificial(R,false);
         std::size_t artificialCount=0;
         for(std::size_t i=0;i<R;++i) if(s.b[i]<-tol_.feasibility) { needsArtificial[i]=true; ++artificialCount; }
@@ -351,14 +688,33 @@ private:
             else basis[i]=slackStart+i;
             basic[basis[i]]=true;
         }
-        SparseLU factorization; std::vector<EtaUpdate> updates; std::string factorFailure;
+        std::vector<double> devexWeights(total,1.0), devexResetWeights(total,1.0);
+        for(std::size_t j=0;j<total;++j) {
+            long double columnNormSquared=0.0L;
+            for(const auto& entry:columns[j]) columnNormSquared+=static_cast<long double>(entry.second)*entry.second;
+            devexWeights[j]=devexResetWeights[j]=std::max(1e-12,static_cast<double>(columnNormSquared));
+        }
+        std::size_t devexUpdatesSinceReset=0;
+        constexpr std::size_t sparseRefactorInterval=15;
+        SparseLU factorization; std::vector<EtaUpdate> updates; updates.reserve(sparseRefactorInterval); std::string factorFailure;
         auto refactorBasis=[&]()->bool {
+            const auto factorizationStart=std::chrono::steady_clock::now();
+            ++refactorizations;
             std::vector<std::unordered_map<std::size_t,double>> matrix(R);
-            for(std::size_t j=0;j<R;++j) for(const auto& item:columns[basis[j]]) matrix[item.first][j]=item.second;
-            if(!factorization.factor(std::move(matrix),1e-30)) {factorFailure="sparse LU failed at pivot "+std::to_string(factorization.failedAt)+" (magnitude "+std::to_string(factorization.failedPivot)+")";return false;}
+            bool timeLimitReached=false;
+            for(std::size_t j=0;j<R;++j) {
+                if(deadlineExpired(deadline)){timeLimitReached=true;break;}
+                for(const auto& item:columns[basis[j]]) matrix[item.first][j]=item.second;
+            }
+            if(timeLimitReached || !factorization.factor(std::move(matrix),1e-30,deadline,timeLimitReached)) {
+                addElapsed(factorizationMs,factorizationStart);
+                factorFailure=timeLimitReached?"wall-clock time limit reached":"sparse LU failed at pivot "+std::to_string(factorization.failedAt)+" (magnitude "+std::to_string(factorization.failedPivot)+")";
+                return false;
+            }
             updates.clear();
-            if(!factorization.solve(rhs,xB)) {factorFailure="sparse LU solve failed for the basis right-hand side";return false;}
+            if(!factorization.solve(rhs,xB)) {addElapsed(factorizationMs,factorizationStart);factorFailure="sparse LU solve failed for the basis right-hand side";return false;}
             for(double& v:xB) if(v<0.0&&v>-100.0*tol_.feasibility*(1.0+std::abs(v)))v=0.0;
+            addElapsed(factorizationMs,factorizationStart);
             return true;
         };
         auto solveCurrent=[&](const std::vector<double>& v,std::vector<double>& result)->bool {
@@ -371,54 +727,92 @@ private:
             }
             return true;
         };
-        auto solveCurrentTranspose=[&](const std::vector<double>& v,std::vector<double>& result)->bool {
-            std::vector<double> transformed=v;
+        std::vector<double> transposeWork(R);
+        auto solveCurrentTranspose=[&](std::vector<double>& transformed,std::vector<double>& result)->bool {
             for(std::size_t u=updates.size();u>0;--u) {
                 const auto& eta=updates[u-1]; const std::size_t r=eta.row;
                 double other=0.0;for(std::size_t i=0;i<R;++i)if(i!=r)other+=eta.direction[i]*transformed[i];
                 const double p=eta.direction[r];if(std::abs(p)<=tol_.pivot)return false;
                 transformed[r]=(transformed[r]-other)/p;
             }
-            return factorization.solveTranspose(transformed,result);
+            return factorization.solveTranspose(transformed,result,transposeWork);
         };
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="initial sparse basis factorization failed";return out;}
+        if(!refactorBasis()) {out.status=deadlineExpired(deadline)?LPStatus::IterationLimit:LPStatus::NumericalFailure;out.message=deadlineExpired(deadline)?"wall-clock time limit reached":"initial sparse basis factorization failed";return finish();}
         std::string simplexFailure;
+        std::vector<double> cb(R,0.0), y(R,0.0), enteringColumn(R,0.0), direction(R,0.0);
+        std::vector<double> devexUnit(R,0.0), devexRow(R,0.0);
+        bool blandPhaseOne=false;
+        std::unordered_set<std::size_t> phaseOneBasisHistory;
+        phaseOneBasisHistory.reserve(std::min<std::size_t>(limit,4096));
+        std::vector<std::size_t> phaseOneRatioTies;
+        phaseOneRatioTies.reserve(R);
         auto simplex=[&](bool phaseOne,std::size_t maxIterations,std::size_t& iterations)->LPStatus {
             for(std::size_t it=0;it<maxIterations;++it) {
-                std::vector<double> cb(R,0.0),y;
+                if(deadlineExpired(deadline)) { iterations=it; out.message="wall-clock time limit reached"; return LPStatus::IterationLimit; }
+                if(phaseOne && !blandPhaseOne) {
+                    std::size_t hash=static_cast<std::size_t>(1469598103934665603ULL);
+                    for(const std::size_t variable:basis) { hash^=variable+1; hash*=static_cast<std::size_t>(1099511628211ULL); }
+                    // A repeated basis switches the remaining auxiliary pivots
+                    // to Bland entering/leaving order. Hash collisions only
+                    // activate the conservative anti-cycling mode early.
+                    if(!phaseOneBasisHistory.insert(hash).second) { blandPhaseOne=true; blandFallbackTriggered=true; }
+                }
+                std::fill(cb.begin(),cb.end(),0.0);
                 for(std::size_t i=0;i<R;++i) cb[i]=phaseOne?(artificial[basis[i]]?-1.0:0.0):(basis[i]<n?s.c[basis[i]]:0.0);
-                if(!solveCurrentTranspose(cb,y)) {iterations=it;simplexFailure="sparse dual basis solve failed";return LPStatus::NumericalFailure;}
-                std::size_t enter=total; double mostPositive=tol_.optimality, enterReduced=0.0;
+                auto stageStart=std::chrono::steady_clock::now();
+                if(!solveCurrentTranspose(cb,y)) {addElapsed(basisSolveMs,stageStart);iterations=it;simplexFailure="sparse dual basis solve failed";return LPStatus::NumericalFailure;}
+                addElapsed(basisSolveMs,stageStart);
+                stageStart=std::chrono::steady_clock::now();
+                std::size_t enter=total; double mostPositive=0.0;
                 for(std::size_t j=0;j<total;++j) {
                     if(basic[j] || artificial[j]) continue;
                     double reduced=phaseOne?0.0:(j<n?s.c[j]:0.0);
                     for(const auto& e:columns[j]) reduced-=e.second*y[e.first];
                     if(reduced>tol_.optimality) {
-                        if(reduced>mostPositive) { mostPositive=reduced; enter=j; enterReduced=reduced; }
+                        if(phaseOne && blandPhaseOne) {
+                            if(enter==total) { mostPositive=reduced; enter=j; }
+                        } else {
+                            const double score=reduced/std::sqrt(devexWeights[j]);
+                            if(score>mostPositive) { mostPositive=score; enter=j; }
+                        }
                     }
                 }
+                addElapsed(pricingMs,stageStart);
                 if(enter==total) { iterations=it; return LPStatus::Optimal; }
-                std::vector<double> enteringColumn(R,0.0),direction;
+                std::fill(enteringColumn.begin(),enteringColumn.end(),0.0);
                 for(const auto& e:columns[enter]) enteringColumn[e.first]=e.second;
-                if(!solveCurrent(enteringColumn,direction)) {iterations=it;simplexFailure="sparse primal basis solve failed";return LPStatus::NumericalFailure;}
+                stageStart=std::chrono::steady_clock::now();
+                if(!solveCurrent(enteringColumn,direction)) {addElapsed(basisSolveMs,stageStart);iterations=it;simplexFailure="sparse primal basis solve failed";return LPStatus::NumericalFailure;}
+                addElapsed(basisSolveMs,stageStart);
                 const double stablePivot=std::max(tol_.pivot,1e-8);
+                stageStart=std::chrono::steady_clock::now();
                 double minRatio=std::numeric_limits<double>::infinity();
                 for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot)
                     minRatio=std::min(minRatio,std::max(0.0,xB[i])/direction[i]);
                 if(!std::isfinite(minRatio)) { iterations=it; return LPStatus::Unbounded; }
                 const double relaxed=minRatio+tol_.feasibility*(1.0+std::abs(minRatio));
                 std::size_t leave=R; double bestPivot=-1.0;
-                std::vector<double> leaveLex;
-                for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot) {
-                    const double ratio=std::max(0.0,xB[i])/direction[i];
-                    if(phaseOne) {
-                        if(leave==R || ratio<minRatio) { minRatio=ratio; leave=i; }
-                        else if(ratio==minRatio) {
-                            // Lexicographic ratio tie-break prevents degenerate
-                            // phase-I pivots from revisiting the same basis.
-                            std::vector<double> unit(R,0.0), candidateLex; unit[i]=1.0;
-                            if(!solveCurrentTranspose(unit,candidateLex)){iterations=it;simplexFailure="sparse lexicographic ratio solve failed";return LPStatus::NumericalFailure;}
-                            if(leaveLex.empty()) {std::vector<double> leavingUnit(R,0.0);leavingUnit[leave]=1.0;if(!solveCurrentTranspose(leavingUnit,leaveLex)){iterations=it;simplexFailure="sparse lexicographic tie solve failed";return LPStatus::NumericalFailure;}}
+                if(phaseOne) {
+                    phaseOneRatioTies.clear();
+                    for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot &&
+                        std::max(0.0,xB[i])/direction[i]==minRatio) phaseOneRatioTies.push_back(i);
+                    // Exact lexicographic perturbation is valuable on small
+                    // tie sets. On large sets its repeated transpose solves
+                    // cost more than the sparse pivot itself; use a stable
+                    // row tie-break and activate full Bland order if a basis
+                    // actually repeats. The work budget scales with tie count.
+                    const bool useLexicographic = !blandPhaseOne && phaseOneRatioTies.size()>1 &&
+                        phaseOneRatioTies.size() <= std::max<std::size_t>(1,8192/std::max<std::size_t>(R,1));
+                    if(useLexicographic) {
+                        leave=phaseOneRatioTies.front();
+                        std::vector<double> leaveLex;
+                        for(std::size_t index=1;index<phaseOneRatioTies.size();++index) {
+                            const std::size_t i=phaseOneRatioTies[index];
+                            std::vector<double> unit(R,0.0), candidateLex(R); unit[i]=1.0;
+                            auto lexStart=std::chrono::steady_clock::now(); ++lexicographicSolves;
+                            if(!solveCurrentTranspose(unit,candidateLex)){addElapsed(lexicographicMs,lexStart);iterations=it;simplexFailure="sparse lexicographic ratio solve failed";return LPStatus::NumericalFailure;}
+                            addElapsed(lexicographicMs,lexStart);
+                            if(leaveLex.empty()) {std::vector<double> leavingUnit(R,0.0);leavingUnit[leave]=1.0;lexStart=std::chrono::steady_clock::now();++lexicographicSolves;if(!solveCurrentTranspose(leavingUnit,leaveLex)){addElapsed(lexicographicMs,lexStart);iterations=it;simplexFailure="sparse lexicographic tie solve failed";return LPStatus::NumericalFailure;}addElapsed(lexicographicMs,lexStart);}
                             for(std::size_t k=0;k<R;++k) {
                                 const double lhs=candidateLex[k]/direction[i];
                                 const double rhsLex=leaveLex[k]/direction[leave];
@@ -426,11 +820,40 @@ private:
                                 if(lhs>rhsLex) break;
                             }
                         }
-                    } else if(ratio<=relaxed && direction[i]>bestPivot) { leave=i; bestPivot=direction[i]; }
+                    } else {
+                        for(const std::size_t i:phaseOneRatioTies)
+                            if(leave==R || (blandPhaseOne ? basis[i]<basis[leave] : i<leave)) leave=i;
+                    }
+                } else {
+                    for(std::size_t i=0;i<R;++i) if(direction[i]>stablePivot) {
+                        const double ratio=std::max(0.0,xB[i])/direction[i];
+                        if(ratio<=relaxed && direction[i]>bestPivot) { leave=i; bestPivot=direction[i]; }
+                    }
                 }
+                addElapsed(ratioTestMs,stageStart);
                 if(leave==R) { iterations=it; return LPStatus::NumericalFailure; }
                 const double pivotValue=direction[leave];
                 const double theta=std::max(0.0,xB[leave])/pivotValue;
+                stageStart=std::chrono::steady_clock::now();
+                std::fill(devexUnit.begin(),devexUnit.end(),0.0); devexUnit[leave]=1.0;
+                if(!solveCurrentTranspose(devexUnit,devexRow)) {addElapsed(devexMs,stageStart);iterations=it;simplexFailure="sparse Devex row solve failed";return LPStatus::NumericalFailure;}
+                long double directionNormSquared=0.0L;
+                for(double value:direction) directionNormSquared+=static_cast<long double>(value)*value;
+                const double pivotSquared=pivotValue*pivotValue;
+                const double leavingNormSquared=(1.0+static_cast<double>(directionNormSquared))/pivotSquared;
+                for(std::size_t j=0;j<total;++j) if(!basic[j] && j!=enter) {
+                    if(artificial[j])continue;
+                    double rowCoefficient=0.0;
+                    for(const auto& entry:columns[j]) rowCoefficient+=entry.second*devexRow[entry.first];
+                    const double approximateNorm=rowCoefficient*rowCoefficient*leavingNormSquared;
+                    if(std::isfinite(approximateNorm)) devexWeights[j]=std::max(devexWeights[j],approximateNorm);
+                }
+                devexWeights[basis[leave]]=leavingNormSquared;
+                if(++devexUpdatesSinceReset>=150) {
+                    devexWeights=devexResetWeights;
+                    devexUpdatesSinceReset=0;
+                }
+                addElapsed(devexMs,stageStart);
                 updates.push_back({leave,direction});
                 for(std::size_t i=0;i<R;++i) if(i!=leave) {
                     const double q=direction[i];
@@ -439,20 +862,22 @@ private:
                 }
                 xB[leave]=theta;
                 basic[basis[leave]]=false; basis[leave]=enter; basic[enter]=true;
+                ++pivots;
                 iterations=it+1;
-                if((it+1)%50==0 && !refactorBasis()) {iterations=it+1;simplexFailure=factorFailure;return LPStatus::NumericalFailure;}
+                if((it+1)%sparseRefactorInterval==0 && !refactorBasis()) {iterations=it+1;simplexFailure=factorFailure;return deadlineExpired(deadline)?LPStatus::IterationLimit:LPStatus::NumericalFailure;}
                 if(it+1==maxIterations) return LPStatus::IterationLimit;
             }
             return LPStatus::IterationLimit;
         };
         std::size_t phaseOneIterations=0;
         LPStatus status=simplex(true,limit,phaseOneIterations); out.iterations=phaseOneIterations;
-        if(status==LPStatus::IterationLimit) { out.status=status; out.message="phase-I iteration limit"; return out; }
-        if(status!=LPStatus::Optimal) { out.status=status; out.message=simplexFailure.empty()?"phase I did not find a feasible basis":simplexFailure; return out; }
+        if(status==LPStatus::IterationLimit) { out.status=status; if(!deadlineExpired(deadline))out.message="phase-I iteration limit"; return finish(); }
+        if(status==LPStatus::Unbounded) { out.status=LPStatus::NumericalFailure; out.message="phase-I auxiliary objective was incorrectly reported unbounded"; return finish(); }
+        if(status!=LPStatus::Optimal) { out.status=status; out.message=simplexFailure.empty()?"phase I did not find a feasible basis":simplexFailure; return finish(); }
         double artificialSum=0.0;
         for(std::size_t i=0;i<R;++i) if(artificial[basis[i]]) artificialSum+=std::max(0.0,xB[i]);
         if(artificialSum>tol_.feasibility*(1.0+std::accumulate(s.b.begin(),s.b.end(),0.0,[](double a,double b){return a+std::abs(b);}))) {
-            out.status=LPStatus::Infeasible; out.message="phase I found no feasible basis"; return out;
+            out.status=LPStatus::Infeasible; out.message="phase I found no feasible basis"; return finish();
         }
         // Replace zero artificial basics with any available real or slack column.
         for(std::size_t row=0;row<R;++row) if(artificial[basis[row]]) {
@@ -463,14 +888,12 @@ private:
                 if(!solveCurrent(enteringColumn,direction))continue;
                 if(std::abs(direction[row])>best){best=std::abs(direction[row]);replacement=j;}
             }
-            if(replacement<total) {
-                basic[basis[row]]=false; basis[row]=replacement; basic[replacement]=true;
-            }
+            if(replacement<artificialStart) { basic[basis[row]]=false; basis[row]=replacement; basic[replacement]=true; }
         }
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="sparse basis factorization failed after phase I";return out;}
+        if(!refactorBasis()) {out.status=deadlineExpired(deadline)?LPStatus::IterationLimit:LPStatus::NumericalFailure;out.message=deadlineExpired(deadline)?"wall-clock time limit reached":"sparse basis factorization failed after phase I";return finish();}
         std::size_t phaseTwoIterations=0; out.status=simplex(false,limit,phaseTwoIterations); out.iterations+=phaseTwoIterations;
-        if(out.status!=LPStatus::Optimal) { out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return out; }
-        if(!refactorBasis()) {out.status=LPStatus::NumericalFailure;out.message="final sparse basis refactorization failed";return out;}
+        if(out.status!=LPStatus::Optimal) { if(!deadlineExpired(deadline))out.message=out.status==LPStatus::Unbounded?"phase-II objective is unbounded":"phase-II solve did not converge"; return finish(); }
+        if(!refactorBasis()) {out.status=deadlineExpired(deadline)?LPStatus::IterationLimit:LPStatus::NumericalFailure;out.message=deadlineExpired(deadline)?"wall-clock time limit reached":"final sparse basis refactorization failed";return finish();}
         std::vector<double> z(n,0.0);
         for(std::size_t i=0;i<R;++i) if(basis[i]<n) z[basis[i]]=std::max(0.0,xB[i]);
         out.solution.primal.assign(m.variables.size(),0.0);
@@ -478,12 +901,18 @@ private:
         for(std::size_t i=0;i<m.variables.size();++i) if(m.variables[i].active&&std::isfinite(m.variables[i].lower)) out.solution.primal[i]+=m.variables[i].lower;
         out.objectiveValue=evaluateObjective(m,out.solution.primal); out.solution.objectiveValue=out.objectiveValue; out.solution.feasibilityResidual=verifyResidual(m,out.solution.primal);
         if(!std::isfinite(out.objectiveValue)||verifyScaledResidual(m,out.solution.primal)>std::max(100.0*tol_.feasibility,1e-7)) {
-            out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return out;
+            out.status=LPStatus::NumericalFailure; out.message="candidate failed original-model primal feasibility check"; return finish();
         }
         out.basisVariables=basis;
-        return out;
+        return finish();
     }
-    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c){double q=t[r][c];t[r]=nla::VectorOps::scale(t[r],1.0/q);for(size_t i=0;i<t.size();++i)if(i!=r){q=t[i][c];nla::VectorOps::axpy(-q,t[r],t[i]);}}
+    static void pivot(std::vector<std::vector<double>>&t,size_t r,size_t c,std::vector<std::size_t>&nonzeroColumns){
+        auto& pivotRow=t[r];const double inverse=1.0/pivotRow[c];
+        for(double& value:pivotRow)value*=inverse;
+        nonzeroColumns.clear();
+        for(size_t j=0;j<pivotRow.size();++j)if(pivotRow[j]!=0.0)nonzeroColumns.push_back(j);
+        for(size_t i=0;i<t.size();++i)if(i!=r){auto& row=t[i];const double factor=row[c];if(factor==0.0)continue;for(const size_t j:nonzeroColumns)row[j]-=factor*pivotRow[j];row[c]=0.0;}
+    }
     static double verifyResidual(const Model&m,const std::vector<double>&x){double r=0;for(auto&c:m.constraints){if(!c.active)continue;double a=0;for(auto p:c.coefficients)a+=p.second*x[p.first];r=std::max(r,c.relation==Relation::Equal?std::abs(a-c.rhs):c.relation==Relation::LessEqual?std::max(0.,a-c.rhs):std::max(0.,c.rhs-a));}return r;}
     static double verifyScaledResidual(const Model&m,const std::vector<double>&x){
         if(x.size()!=m.variables.size())return std::numeric_limits<double>::infinity();double worst=0;

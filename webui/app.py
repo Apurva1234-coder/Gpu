@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import csv
+from functools import lru_cache
 import io
 import os
 import platform
@@ -47,6 +48,8 @@ ACTIVE_SOLVER_JOB_ID: str | None = None
 
 def _cpu_solver_path() -> Path:
     candidates = [
+        ROOT / "cpp_solver" / "build-route-cpu" / "sovereign_presolve_cli.exe",
+        ROOT / "cpp_solver" / "build-route-cpu" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build" / "sovereign_presolve_cli",
@@ -59,6 +62,8 @@ def _cpu_solver_path() -> Path:
 
 def _cuda_solver_path() -> Path:
     candidates = [
+        ROOT / "cpp_solver" / "build-route-cuda" / "sovereign_presolve_cli.exe",
+        ROOT / "cpp_solver" / "build-route-cuda" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build-cuda" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build-cuda" / "Release" / "sovereign_presolve_cli.exe",
         ROOT / "cpp_solver" / "build-cuda" / "sovereign_presolve_cli",
@@ -81,6 +86,8 @@ def _solver_path(prefer_cuda: bool = False) -> Path:
 def _emps_converter_path() -> Path:
     """Return the locally built Netlib EMPS reference decoder."""
     candidates = [
+        ROOT / "cpp_solver" / "build-route-cpu" / "netlib_emps.exe",
+        ROOT / "cpp_solver" / "build-route-cpu" / "Release" / "netlib_emps.exe",
         ROOT / "cpp_solver" / "build" / "netlib_emps.exe",
         ROOT / "cpp_solver" / "build" / "Release" / "netlib_emps.exe",
         ROOT / "cpp_solver" / "build" / "netlib_emps",
@@ -152,6 +159,8 @@ def _expand_netlib_emps(source: Path, directory: Path) -> Path:
                 stdout=output,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 check=False,
             )
@@ -490,20 +499,78 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
     timings = {
         "parse_time_ms": _capture(r"^Parse time ms:\s*([^\r\n]+)$", output, None, float),
         "presolve_time_ms": _capture(r"^Presolve time ms:\s*([^\r\n]+)$", output, None, float),
+        "standardization_time_ms": _capture(r"^Standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "solve_pipeline_time_ms": _capture(r"^Solve pipeline time ms:\s*([^\r\n]+)$", output, None, float),
         "solver_time_ms": _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_convexity_check_time_ms": _capture(r"^Convexity check time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_transformation_time_ms": _capture(r"^Transformation time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_scaling_time_ms": _capture(r"^Scaling time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_initialization_time_ms": _capture(r"^Initialization time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_residual_computation_time_ms": _capture(r"^Residual computation time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_newton_assembly_time_ms": _capture(r"^Newton assembly time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_linear_system_build_time_ms": _capture(r"^Linear system build time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_linear_solve_time_ms": _capture(r"^Linear solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "qp_newton_update_time_ms": _capture(r"^Newton update time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_model_preparation_time_ms": _capture(r"^MILP Model Preparation time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_time_ms": _capture(r"^Root LP time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_standardization_time_ms": _capture(r"^Root LP standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_pricing_time_ms": _capture(r"^Root LP sparse pricing time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_basis_solve_time_ms": _capture(r"^Root LP sparse basis solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_factorization_time_ms": _capture(r"^Root LP sparse factorization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_feasibility_pump_time_ms": _capture(r"^Feasibility Pump time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_branch_and_bound_time_ms": _capture(r"^Branch-and-Bound time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_selection_time_ms": _capture(r"^Node selection time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_model_update_time_ms": _capture(r"^Node model/update time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_time_ms": _capture(r"^Node LP time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_standardization_time_ms": _capture(r"^Node LP standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_sparse_factorization_time_ms": _capture(r"^Node LP sparse factorization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_branching_time_ms": _capture(r"^Branching time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_pruning_time_ms": _capture(r"^Pruning time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_total_solver_time_ms": _capture(r"^Total MILP solver time ms:\s*([^\r\n]+)$", output, None, float),
         "postsolve_time_ms": _capture(r"^Postsolve time ms:\s*([^\r\n]+)$", output, None, float),
         "verification_time_ms": _capture(r"^Verification time ms:\s*([^\r\n]+)$", output, None, float),
         "backend_total_time_ms": total_ms,
+        "solver_time_source": "cpp_solver" if _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None) is not None else "unavailable",
         "model_preparation_time_ms": None,
     }
     timing = {
         "parsing_ms": timings["parse_time_ms"],
         "model_preparation_ms": timings["model_preparation_time_ms"],
         "presolve_ms": timings["presolve_time_ms"],
+        "standardization_ms": timings["standardization_time_ms"],
         "solver_ms": timings["solver_time_ms"],
         "postsolve_ms": timings["postsolve_time_ms"],
         "verification_ms": timings["verification_time_ms"],
         "backend_total_ms": timings["backend_total_time_ms"],
+        "milp_stages_ms": {
+            "model_preparation": timings["milp_model_preparation_time_ms"],
+            "root_lp": timings["milp_root_lp_time_ms"],
+            "root_lp_standardization": timings["milp_root_lp_standardization_time_ms"],
+            "root_lp_sparse_pricing": timings["milp_root_lp_sparse_pricing_time_ms"],
+            "root_lp_sparse_basis_solve": timings["milp_root_lp_sparse_basis_solve_time_ms"],
+            "root_lp_sparse_factorization": timings["milp_root_lp_sparse_factorization_time_ms"],
+            "feasibility_pump": timings["milp_feasibility_pump_time_ms"],
+            "branch_and_bound": timings["milp_branch_and_bound_time_ms"],
+            "node_selection": timings["milp_node_selection_time_ms"],
+            "node_model_update": timings["milp_node_model_update_time_ms"],
+            "node_lp": timings["milp_node_lp_time_ms"],
+            "node_lp_standardization": timings["milp_node_lp_standardization_time_ms"],
+            "node_lp_sparse_factorization": timings["milp_node_lp_sparse_factorization_time_ms"],
+            "branching": timings["milp_branching_time_ms"],
+            "pruning": timings["milp_pruning_time_ms"],
+            "total_solver": timings["milp_total_solver_time_ms"],
+        },
+        "qp_stages_ms": {
+            "convexity_check": timings["qp_convexity_check_time_ms"],
+            "transformation": timings["qp_transformation_time_ms"],
+            "scaling": timings["qp_scaling_time_ms"],
+            "initialization": timings["qp_initialization_time_ms"],
+            "residual_computation": timings["qp_residual_computation_time_ms"],
+            "newton_assembly": timings["qp_newton_assembly_time_ms"],
+            "linear_system_build": timings["qp_linear_system_build_time_ms"],
+            "linear_solve": timings["qp_linear_solve_time_ms"],
+            "newton_update": timings["qp_newton_update_time_ms"],
+        },
     }
     names = (_capture(r"^Primal Names:\s*(.*)$", output, "") or "").split()
     primal_line = _capture(r"^Primal:\s*(.*)$", output, "") or ""
@@ -531,34 +598,142 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
                 continue
         variables = sparse_variables
     presolve = {
+        "termination_reason": _capture(r"^Presolve termination:\s*([^\r\n]+)$", output, None),
+        "time_budget_ms": _capture(r"^Presolve time budget ms:\s*([^\r\n]+)$", output, None, float),
         "before_variables": _capture(r"^Variables:\s*(\d+)$", output, None, int),
         "before_constraints": _capture(r"^Constraints:\s*(\d+)$", output, None, int),
         "after_variables": _capture(r"^Final variables:\s*(\d+)$", output, None, int),
         "after_constraints": _capture(r"^Final constraints:\s*(\d+)$", output, None, int),
         "reductions": _capture(r"^Presolve reductions:\s*(\d+)$", output, None, int),
+        "before_nonzeros": _capture(r"^Nonzeros:\s*(\d+)$", output, None, int),
+        "standardized_rows": _capture(r"^Standardized rows:\s*(\d+)$", output, None, int),
+        "standardized_columns": _capture(r"^Standardized columns:\s*(\d+)$", output, None, int),
+        "standardized_nonzeros": _capture(r"^Standardized nonzeros:\s*(\d+)$", output, None, int),
+        "pass_stats": [line for line in re.findall(r"(?im)^Presolve pass:\s*[^\r\n]+$", output)],
     }
     metrics = {
         "objective": _capture(r"^Objective:\s*([^\r\n]+)$", output, None, float),
         "iterations": _capture(r"^Iterations:\s*(\d+)$", output, None, int),
+        "linear_system_solves": _capture(r"^Linear system solves:\s*(\d+)$", output, None, int),
+        "linear_solver_iterations": _capture(r"^PCG iterations:\s*(\d+)$", output, None, int),
         "nodes_created": _capture(r"^Nodes Created:\s*(\d+)$", output, None, int),
         "nodes_processed": _capture(r"^Nodes Processed:\s*(\d+)$", output, None, int),
         "nodes_pruned": _capture(r"^Nodes Pruned:\s*(\d+)$", output, None, int),
+        "nodes_pruned_before_lp": _capture(r"^Nodes Pruned Before LP:\s*(\d+)$", output, None, int),
+        "node_lp_solves_avoided_by_bound": _capture(r"^Node LP Solves Avoided by Bound:\s*(\d+)$", output, None, int),
         "lp_solves": _capture(r"^LP Solves:\s*(\d+)$", output, None, int),
         "lp_iterations": _capture(r"^LP Iterations:\s*(\d+)$", output, None, int),
+        "root_lp_iterations": _capture(r"^Root LP iterations:\s*(\d+)$", output, None, int),
+        "root_lp_method": _capture(r"^Root LP method:\s*([^\r\n]+)$", output, None),
+        "node_lp_iterations": _capture(r"^Node LP iterations:\s*(\d+)$", output, None, int),
+        "root_fractional_integer_variables": _capture(r"^Root fractional integer variables:\s*(\d+)$", output, None, int),
+        "feasibility_pump_lp_solves": _capture(r"^Feasibility Pump LP solves:\s*(\d+)$", output, None, int),
+        "feasibility_pump_iterations": _capture(r"^Feasibility Pump iterations:\s*(\d+)$", output, None, int),
+        "incumbent_updates": _capture(r"^Incumbent updates:\s*(\d+)$", output, None, int),
+        "root_rounding_heuristic_attempts": _capture(r"^Root rounding heuristic attempts:\s*(\d+)$", output, None, int),
+        "root_rounding_heuristic_accepted": _capture(r"^Root rounding heuristic accepted:\s*(\d+)$", output, None, int),
+        "first_incumbent_node": _capture(r"^First incumbent node:\s*(\d+)$", output, None, int),
+        "first_incumbent_time_ms": _capture(r"^First incumbent time ms:\s*([\d.eE+-]+)$", output, None, float),
+        "maximum_depth": _capture(r"^Maximum depth:\s*(\d+)$", output, None, int),
+        "peak_open_nodes": _capture(r"^Peak open nodes:\s*(\d+)$", output, None, int),
+        "cuts_generated": _capture(r"^Cuts generated:\s*(\d+)$", output, None, int),
+        "cuts_accepted": _capture(r"^Cuts accepted:\s*(\d+)$", output, None, int),
+        "cuts_rejected": _capture(r"^Cuts rejected:\s*(\d+)$", output, None, int),
+        "warm_starts_attempted": _capture(r"^Warm starts attempted:\s*(\d+)$", output, None, int),
+        "warm_starts_successful": _capture(r"^Warm starts successful:\s*(\d+)$", output, None, int),
+        "warm_starts_failed": _capture(r"^Warm starts failed:\s*(\d+)$", output, None, int),
+        "cold_fallbacks": _capture(r"^Cold fallbacks:\s*(\d+)$", output, None, int),
+        "cold_starts": _capture(r"^Cold starts:\s*(\d+)$", output, None, int),
+        "milp_model_preparation_time_ms": timings["milp_model_preparation_time_ms"],
+        "milp_root_lp_time_ms": timings["milp_root_lp_time_ms"],
+        "milp_root_lp_standardization_time_ms": timings["milp_root_lp_standardization_time_ms"],
+        "milp_root_lp_sparse_pricing_time_ms": timings["milp_root_lp_sparse_pricing_time_ms"],
+        "milp_root_lp_sparse_basis_solve_time_ms": timings["milp_root_lp_sparse_basis_solve_time_ms"],
+        "milp_root_lp_sparse_factorization_time_ms": timings["milp_root_lp_sparse_factorization_time_ms"],
+        "milp_feasibility_pump_time_ms": timings["milp_feasibility_pump_time_ms"],
+        "milp_branch_and_bound_time_ms": timings["milp_branch_and_bound_time_ms"],
+        "milp_node_selection_time_ms": timings["milp_node_selection_time_ms"],
+        "milp_node_model_update_time_ms": timings["milp_node_model_update_time_ms"],
+        "milp_node_lp_time_ms": timings["milp_node_lp_time_ms"],
+        "milp_node_lp_standardization_time_ms": timings["milp_node_lp_standardization_time_ms"],
+        "milp_node_lp_sparse_factorization_time_ms": timings["milp_node_lp_sparse_factorization_time_ms"],
+        "milp_branching_time_ms": timings["milp_branching_time_ms"],
+        "milp_pruning_time_ms": timings["milp_pruning_time_ms"],
+        "milp_total_solver_time_ms": timings["milp_total_solver_time_ms"],
         "primal_bound": _capture(r"^Primal Bound:\s*([^\r\n]+)$", output, None, float),
         "dual_bound": _capture(r"^Dual Bound:\s*([^\r\n]+)$", output, None, float),
         "absolute_gap": _capture(r"^Absolute Gap:\s*([^\r\n]+)$", output, None, float),
         "relative_gap": _capture(r"^Relative Gap:\s*([^\r\n]+)$", output, None, float),
         "primal_residual": _capture(r"^Primal residual:\s*([^\r\n]+)$", output, None, float),
         "dual_residual": _capture(r"^Dual residual:\s*([^\r\n]+)$", output, None, float),
+        "complementarity_residual": _capture(r"^Complementarity(?: residual)?:\s*([^\r\n]+)$", output, None, float),
         "feasibility": _capture(r"^Feasibility:\s*([^\r\n]+)$", output, None, float),
         "iteration_limit": _capture(r"^Iteration limit:\s*(.+)$", output, None),
+        "attempt_count": _capture(r"^Attempt count:\s*(\d+)$", output, None, int),
+        "fallback_reason": _capture(r"^Fallback reason:\s*([^\r\n]+)$", output, None),
+        "estimated_dense_memory_bytes": _capture(r"^Estimated dense memory bytes:\s*([^\r\n]+)$", output, None, float),
+        "dense_memory_budget_bytes": _capture(r"^Dense memory budget bytes:\s*([^\r\n]+)$", output, None, int),
+        "dense_memory_guard_triggered": _capture(r"^Dense memory guard:\s*(TRIGGERED|NOT TRIGGERED)$", output, None),
+        "sparse_pricing_ms": _capture(r"^Sparse pricing time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_basis_solve_ms": _capture(r"^Sparse basis solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_devex_ms": _capture(r"^Sparse Devex time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_factorization_ms": _capture(r"^Sparse factorization time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_ratio_test_ms": _capture(r"^Sparse ratio test time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_lexicographic_ms": _capture(r"^Sparse lexicographic time ms:\s*([^\r\n]+)$", output, None, float),
+        "sparse_refactorizations": _capture(r"^Sparse refactorizations:\s*(\d+)$", output, None, int),
+        "sparse_pivots": _capture(r"^Sparse pivots:\s*(\d+)$", output, None, int),
+        "sparse_lexicographic_solves": _capture(r"^Sparse lexicographic solves:\s*(\d+)$", output, None, int),
+        "sparse_bland_fallback_triggered": _capture(r"^Sparse Bland fallback:\s*(YES|NO)$", output, None) == "YES",
         "backend": _capture(r"^Backend:\s*(.+)$", output, "cpu"),
-        "method": _capture(r"^METHOD:\s*(.+)$", output, None),
+        "backend_reason": _capture(r"^Backend reason:\s*(.+)$", output, None),
+        "build_compiler": _capture(r"^Build compiler:\s*([^\r\n]+)$", output, None),
+        "build_type": _capture(r"^Build type:\s*([^\r\n]+)$", output, None),
+        "build_mode": _capture(r"^Build mode:\s*([^\r\n]+)$", output, None),
+        "method": _capture(r"^METHOD:\s*(.+)$", output, None) or _capture(r"^Method:\s*(.+)$", output, None),
+        "selected_algorithm": _capture(r"^Selected algorithm:\s*(.+)$", output, None),
+        "resolved_algorithm": _capture(r"^Resolved algorithm:\s*(.+)$", output, None),
         "message": _capture(r"^Message:[ \t]*([^\r\n]*)$", output, None),
         "convexity": _capture(r"^Hessian:\s*(.+)$", output, None),
     }
+    if status == "TIME_LIMIT":
+        status = "TIME_LIMIT_WITH_INCUMBENT" if metrics["objective"] is not None and verification == "PASS" else "TIME_LIMIT_NO_INCUMBENT"
     return {"status": status, "verification": verification, "timings": timings, "timing": timing, "metrics": metrics, "presolve": presolve, "variables": variables, "sparse_primal": sparse_variables is not None, "raw_log": output[-16000:]}
+
+
+def _record_execution_trace(result: dict[str, Any], job: dict[str, Any], configuration: dict[str, Any]) -> None:
+    metrics = result.setdefault("metrics", {})
+    model_size = str(configuration.get("model_size") or SolverPolicy.limits_for(job["analysis"])[0].name)
+    problem_type = str(job["analysis"].get("problem_type", "UNKNOWN")).upper()
+    selected = str(configuration.get("selected_algorithm") or configuration.get("method") or "revised-simplex")
+    resolved = str(metrics.get("resolved_algorithm") or metrics.get("method") or selected)
+    backend = str(metrics.get("backend") or configuration.get("backend") or "unknown").lower()
+    configuration.update({
+        "problem_type": problem_type,
+        "model_size": model_size,
+        "user_selected_algorithm": selected,
+        "resolved_algorithm": resolved,
+        "backend": backend,
+        "resolved_backend": backend,
+        "time_limit_seconds": int(configuration.get("time_limit_seconds", 0)),
+    })
+    trace = {
+        "problem_type": problem_type,
+        "model_size": model_size,
+        "user_selected_algorithm": selected,
+        "resolved_algorithm": resolved,
+        "resolved_backend": backend,
+        "time_limit_seconds": configuration["time_limit_seconds"],
+        "solver_executable": configuration.get("solver_executable"),
+        "build_mode": metrics.get("build_mode"),
+    }
+    result["execution_trace"] = trace
+    configuration["build_mode"] = metrics.get("build_mode")
+    metrics.update({"problem_type": problem_type, "model_size": model_size,
+                    "user_selected_algorithm": selected, "resolved_algorithm": resolved,
+                    "resolved_backend": backend, "time_limit_seconds": trace["time_limit_seconds"]})
+    trace_text = "\n".join(f"{key}: {value}" for key, value in trace.items())
+    raw_log = str(result.get("raw_log") or "")
+    result["raw_log"] = f"EXECUTION ROUTING TRACE\n{trace_text}\n\n{raw_log}"[-16000:]
 
 
 def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | None = None) -> None:
@@ -566,14 +741,34 @@ def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | N
     timings = result.setdefault("timings", {})
     if backend_total_ms is not None:
         timings["backend_total_time_ms"] = backend_total_ms
+    milp_stages = {
+        "model_preparation": timings.get("milp_model_preparation_time_ms"),
+        "root_lp": timings.get("milp_root_lp_time_ms"),
+        "root_lp_standardization": timings.get("milp_root_lp_standardization_time_ms"),
+        "root_lp_sparse_pricing": timings.get("milp_root_lp_sparse_pricing_time_ms"),
+        "root_lp_sparse_basis_solve": timings.get("milp_root_lp_sparse_basis_solve_time_ms"),
+        "root_lp_sparse_factorization": timings.get("milp_root_lp_sparse_factorization_time_ms"),
+        "feasibility_pump": timings.get("milp_feasibility_pump_time_ms"),
+        "branch_and_bound": timings.get("milp_branch_and_bound_time_ms"),
+        "node_selection": timings.get("milp_node_selection_time_ms"),
+        "node_model_update": timings.get("milp_node_model_update_time_ms"),
+        "node_lp": timings.get("milp_node_lp_time_ms"),
+        "node_lp_standardization": timings.get("milp_node_lp_standardization_time_ms"),
+        "node_lp_sparse_factorization": timings.get("milp_node_lp_sparse_factorization_time_ms"),
+        "branching": timings.get("milp_branching_time_ms"),
+        "pruning": timings.get("milp_pruning_time_ms"),
+        "total_solver": timings.get("milp_total_solver_time_ms"),
+    }
     result["timing"] = {
         "parsing_ms": timings.get("parse_time_ms"),
         "model_preparation_ms": timings.get("model_preparation_time_ms"),
         "presolve_ms": timings.get("presolve_time_ms"),
+        "standardization_ms": timings.get("standardization_time_ms"),
         "solver_ms": timings.get("solver_time_ms"),
         "postsolve_ms": timings.get("postsolve_time_ms"),
         "verification_ms": timings.get("verification_time_ms"),
         "backend_total_ms": timings.get("backend_total_time_ms"),
+        "milp_stages_ms": milp_stages,
     }
 
 
@@ -639,9 +834,10 @@ def _solution_variables(parsed: list[dict[str, Any]], metadata: list[dict[str, A
     }
 
 
+@lru_cache(maxsize=1)
 def device_info() -> dict[str, Any]:
     try:
-        completed = subprocess.run([str(_solver_path(prefer_cuda=True)), "--device-info"], capture_output=True, text=True, timeout=10, check=False)
+        completed = subprocess.run([str(_solver_path(prefer_cuda=True)), "--device-info"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
         text = completed.stdout.strip()
     except (OSError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
         text = f"CUDA status unavailable: {exc}"
@@ -669,16 +865,29 @@ def device_info() -> dict[str, Any]:
 
 class SolveRequest(BaseModel):
     job_id: str
-    method: str = Field(default="auto", pattern="^(auto|revised-simplex|dual-simplex|ipm|pdhg|qp|milp|lp-relaxation|cutting-plane|feasibility-pump)$")
+    method: str = Field(default="auto", pattern="^(auto|revised-simplex|dual-simplex|ipm|qp|milp|lp-relaxation|cutting-plane|feasibility-pump)$")
+    selected_algorithm: str | None = Field(default=None, pattern="^(auto|revised-simplex|dual-simplex|ipm|qp|milp|cutting-plane|feasibility-pump)$")
+    problem_type: str | None = Field(default=None, pattern="^(LP|MILP|QP)$")
     backend: str = Field(default="auto", pattern="^(auto|cpu|cuda)$")
     presolve: bool = True
     max_iterations: int = Field(default=10000, ge=0, le=10_000_000)
     max_nodes: int = Field(default=10000, ge=0, le=10_000_000)
-    time_limit_seconds: int = Field(default=0, ge=0, le=3600)
+    time_limit_seconds: int | None = Field(default=None, ge=0, le=3600)
 
 
 class AutoSolveRequest(BaseModel):
     job_id: str
+
+
+class RoutePreviewRequest(BaseModel):
+    problem_type: str = Field(pattern="^(LP|MILP|QP)$")
+    selected_algorithm: str = Field(pattern="^(revised-simplex|dual-simplex|ipm|qp|milp|cutting-plane|feasibility-pump)$")
+    backend: str = Field(default="auto", pattern="^auto$")
+
+
+class ActiveModelCompareRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=64)
+    time_limit_seconds: int = Field(default=60, ge=1, le=3600)
 
 
 app = FastAPI(title="Sovereign Optimization API", version="1.0")
@@ -688,11 +897,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:8000", "http
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     try:
-        solver = str(_solver_path(prefer_cuda=True))
+        solver_path = _cpu_solver_path()
+        solver = str(solver_path)
         ready = True
     except FileNotFoundError as exc:
+        solver_path = None
         solver, ready = str(exc), False
-    return {"status": "ready" if ready else "degraded", "solver": solver}
+    build_mode = None
+    if solver_path is not None:
+        try:
+            info = subprocess.run([str(solver_path), "--build-info"], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=3, check=False)
+            build_mode = _capture(r"^Build mode:\s*([^\r\n]+)$", info.stdout, None)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        cuda_solver = str(_cuda_solver_path())
+    except FileNotFoundError:
+        cuda_solver = None
+    return {"status": "ready" if ready else "degraded", "solver": solver,
+            "cpu_solver": solver, "cpu_build_mode": build_mode, "cuda_solver": cuda_solver}
 
 
 @app.get("/api/device")
@@ -707,14 +931,15 @@ def capabilities() -> dict[str, Any]:
         "formats": sorted(extension.removeprefix(".") for extension in ALLOWED_EXTENSIONS),
         "problem_types": ["LP", "QP", "MILP"],
         "methods": {
-            "LP": ["revised-simplex", "dual-simplex", "ipm", "pdhg"],
+        "LP": ["revised-simplex", "dual-simplex", "ipm"],
             "QP": ["qp"],
             "MILP": ["milp", "cutting-plane", "feasibility-pump", "lp-relaxation"],
         },
         "cuda_available": info["cuda_available"],
         "cuda_reason": info["cuda_reason"],
         "automatic_execution_policy": {
-            "time_limits_seconds": [0],
+            "time_limits_seconds": [60, 120, 300],
+            "time_limits_by_model_size": {"SMALL": 60, "MEDIUM": 120, "LARGE": 300},
             "lp_iteration_limits": [0],
             "qp_iteration_limits": [200],
             "milp_lp_iteration_limits": [10000, 25000, 50000],
@@ -827,31 +1052,77 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         raise HTTPException(409, "This model's previous run was cancelled and its temporary input was removed. Upload or select the model again before starting a new solve.")
     started = time.perf_counter()
     info = device_info()
-    # The API's generic `method=auto` route is also an automatic upload path.
-    # Do not let SolveRequest's expert-mode default reintroduce an LP cap.
-    if configuration.get("method") == "auto" and str(job["analysis"].get("problem_type", "")).upper() == "LP":
-        configuration["max_iterations"] = 0
-    if configuration["backend"] == "auto":
-        cuda_method = configuration["method"] in {"pdhg", "ipm", "qp"}
-        configuration["backend"] = "cuda" if cuda_method and info["cuda_available"] else "cpu"
-    if configuration["backend"] == "cuda" and not info["cuda_available"]:
+    model_size = SolverPolicy.limits_for(job["analysis"])[0].name
+    configuration["model_size"] = model_size
+    configuration["problem_type"] = str(job["analysis"].get("problem_type", "UNKNOWN")).upper()
+    presolve_work = sum(max(0, int(job["analysis"].get(key, 0))) for key in ("variables", "constraints", "nonzeros"))
+    requested_time_limit = int(configuration.get("time_limit_seconds", 0))
+    if (configuration.get("problem_type") == "LP" and configuration.get("presolve", True)
+            and presolve_work >= SolverPolicy.ADAPTIVE_PRESOLVE_WORK_THRESHOLD and requested_time_limit > 0):
+        configuration["presolve_time_limit_ms"] = min(2000.0, max(25.0, requested_time_limit * 50.0))
+    else:
+        configuration["presolve_time_limit_ms"] = 0.0
+    # Auto always selects an in-house Sovereign algorithm. Reference solvers
+    # are used only by the separate, explicitly requested comparison route.
+    if configuration.get("method") == "auto":
+        selection = SolverPolicy.select(job["analysis"], info)
+        configuration["method"] = selection.method
+        configuration["selected_algorithm"] = selection.method
+        configuration["user_selected_algorithm"] = selection.method
+        configuration["max_iterations"] = selection.max_iterations
+        if int(configuration.get("time_limit_seconds", 0)) == 0:
+            configuration["time_limit_seconds"] = selection.time_limit_seconds
+        configuration["execution_time_limit_seconds"] = configuration["time_limit_seconds"]
+    requested_backend = configuration.get("backend", "auto")
+    if requested_backend == "cuda" and configuration.get("method") not in {"ipm", "qp"}:
+        raise HTTPException(422, f"CUDA execution is not implemented for {configuration.get('method')}.")
+    configuration["backend_requested"] = requested_backend
+    if requested_backend == "cuda" and not info["cuda_available"]:
         raise HTTPException(409, "CUDA backend is unavailable on this system.")
     try:
-        solver = _cuda_solver_path() if configuration["backend"] == "cuda" else _cpu_solver_path()
+        if requested_backend == "cuda":
+            solver = _cuda_solver_path()
+        elif requested_backend == "cpu":
+            solver = _cpu_solver_path()
+        elif configuration["method"] == "qp":
+            # The current QP Newton/Schur path is CPU-based (matrix-free PCG).
+            # Keep Auto honest and avoid starting a CUDA context unless the
+            # user explicitly requests CUDA for a QP run.
+            solver = _cpu_solver_path()
+        elif configuration["method"] == "ipm" and info["cuda_available"]:
+            try:
+                solver = _cuda_solver_path()
+            except FileNotFoundError:
+                # The CPU executable can still honor the same C++ auto policy,
+                # which will fall back to CPU when its CUDA context is absent.
+                solver = _cpu_solver_path()
+        else:
+            solver = _cpu_solver_path()
     except FileNotFoundError as exc:
         raise HTTPException(503, str(exc)) from exc
-    command = [str(solver), "--input", str(job["path"]), "--backend", configuration["backend"]]
+    command = [str(solver), "--input", str(job["path"]), "--backend", requested_backend]
+    command.extend(["--model-size", model_size])
     if configuration["method"] != "auto":
         command.extend(["--method", configuration["method"]])
     if not configuration["presolve"]:
         command.append("--no-presolve")
+    if configuration.get("presolve_time_limit_ms", 0.0) > 0:
+        command.extend(["--presolve-time-ms", str(configuration["presolve_time_limit_ms"])])
     if configuration["method"] not in {"cutting-plane", "feasibility-pump", "lp-relaxation"}:
         command.extend(["--max-iterations", str(configuration["max_iterations"])])
     if configuration["method"] == "milp":
         command.extend(["--max-nodes", str(configuration.get("max_nodes", 10000))])
+        if configuration.get("warm_start", False):
+            command.extend(["--warm-start", "1"])
+        milp_wall_limit = float(configuration.get("execution_time_limit_seconds", configuration.get("time_limit_seconds", 0)))
+        if milp_wall_limit > 0:
+            # Leave time for the C++ wrapper to verify and serialize the best
+            # incumbent before the subprocess watchdog expires.
+            command.extend(["--time-limit-ms", str(max(1.0, milp_wall_limit * 1000.0 - 1500.0))])
         if int(job["analysis"].get("variables", 0)) >= 50_000:
             command.append("--sparse-primal")
-    execution_limit = int(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
+    configuration["solver_executable"] = str(solver)
+    execution_limit = float(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
     process: subprocess.Popen[str] | None = None
     try:
         with JOB_LOCK:
@@ -861,7 +1132,7 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
             job["state"] = "solving"
             job["configuration"] = configuration
             job["started_at"] = time.time()
-            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
             job["process"] = process
             ACTIVE_SOLVER_PROCESS = process
             ACTIVE_SOLVER_JOB_ID = job_id
@@ -872,6 +1143,13 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         total_ms = (time.perf_counter() - started) * 1000
         raw_output = (stdout or "") + (("\nSTDERR:\n" + stderr) if stderr else "")
         result = parse_solver_output(raw_output, total_ms)
+        actual_backend = str(result["metrics"].get("backend") or "").lower()
+        if actual_backend in {"cpu", "cuda"}:
+            configuration["backend"] = actual_backend
+        else:
+            configuration["backend"] = "unknown"
+        configuration["backend_reason"] = result["metrics"].get("backend_reason")
+        _record_execution_trace(result, job, configuration)
         result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
         _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
         if process.returncode != 0 and result["status"] == "FAILED":
@@ -888,10 +1166,21 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         total_ms = (time.perf_counter() - started) * 1000
         text = (stdout or exc.stdout or "") if isinstance(stdout or exc.stdout, str) else ""
         result = parse_solver_output(text, total_ms)
+        actual_backend = str(result["metrics"].get("backend") or "").lower()
+        configuration["backend"] = actual_backend if actual_backend in {"cpu", "cuda"} else "unknown"
+        configuration["backend_reason"] = result["metrics"].get("backend_reason")
+        _record_execution_trace(result, job, configuration)
         result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
         _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
-        result["status"] = "TIME_LIMIT"
-        result["metrics"]["message"] = f"The solver reached the configured {execution_limit}-second time limit."
+        if result["timings"].get("solver_time_ms") is None:
+            result["timings"]["solver_time_ms"] = total_ms
+            result["timings"]["solver_time_source"] = "python_process_wall_clock"
+        if result["metrics"].get("objective") is not None and result["verification"] == "PASS":
+            result["status"] = "TIME_LIMIT_WITH_INCUMBENT"
+            result["metrics"]["message"] = "A verified feasible solution was returned before the Python process time limit, but optimality was not proven."
+        else:
+            result["status"] = "TIME_LIMIT_NO_INCUMBENT"
+            result["metrics"]["message"] = "No verified feasible incumbent was found within the configured time budget."
     finally:
         with JOB_LOCK:
             job.pop("process", None)
@@ -927,12 +1216,94 @@ def solve(request: SolveRequest) -> dict[str, Any]:
         raise HTTPException(404, "Unknown or expired job ID. Analyze a model first.")
     request_started = time.perf_counter()
     configuration = request.model_dump()
+    if request.selected_algorithm:
+        configuration["method"] = request.selected_algorithm
+    configuration["selected_algorithm"] = configuration["method"]
+    detected_type = str(job["analysis"].get("problem_type", "")).upper()
+    if configuration.get("time_limit_seconds") is None:
+        configuration["time_limit_seconds"] = SolverPolicy.limits_for(job["analysis"])[0].time_limit_seconds
+    if request.problem_type and request.problem_type != detected_type:
+        raise HTTPException(409, f"The submitted problem type {request.problem_type} does not match the analyzed model type {detected_type}.")
+    if configuration["method"] != "auto":
+        compatible = {
+            "LP": {"revised-simplex", "dual-simplex", "ipm"},
+            "MILP": {"milp", "cutting-plane", "feasibility-pump", "lp-relaxation"},
+            "QP": {"qp"},
+        }
+        if configuration["method"] not in compatible.get(detected_type, set()):
+            raise HTTPException(422, f"{configuration['method']} is not a supported method for {detected_type} models.")
+    effective_method = configuration["method"]
+    if effective_method == "auto":
+        effective_method = SolverPolicy.select(job["analysis"], device_info()).method
+    if configuration["backend"] == "cuda" and effective_method not in {"ipm", "qp"}:
+        raise HTTPException(422, f"CUDA execution is not implemented for {effective_method}.")
     configuration["execution_time_limit_seconds"] = configuration["time_limit_seconds"]
     result = _run_solver(request.job_id, job, configuration)
     completed = _complete_result(request.job_id, job, configuration, result, {"mode": "expert", "attempts": [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"]}]})
     _publish_timing_contract(completed, float(job.get("preparation_time_ms", 0.0)) + (time.perf_counter() - request_started) * 1000)
     job["result"] = completed
     return completed
+
+
+@app.post("/api/route/{job_id}")
+def preview_solver_route(job_id: str, request: RoutePreviewRequest) -> dict[str, Any]:
+    """Ask the same C++ size-aware selector used at solve time to preview CPU/CUDA."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Unknown or expired job ID. Analyze a model first.")
+    detected_type = str(job["analysis"].get("problem_type", "")).upper()
+    if request.problem_type != detected_type:
+        raise HTTPException(409, f"The submitted problem type {request.problem_type} does not match the analyzed model type {detected_type}.")
+    compatible = {
+        "LP": {"revised-simplex", "dual-simplex", "ipm"},
+        "MILP": {"milp", "cutting-plane", "feasibility-pump"},
+        "QP": {"qp"},
+    }
+    if request.selected_algorithm not in compatible.get(detected_type, set()):
+        raise HTTPException(422, f"{request.selected_algorithm} is not a supported method for {detected_type} models.")
+    info = device_info()
+    solver: Path
+    if request.selected_algorithm in {"ipm", "qp"} and info["cuda_available"]:
+        try:
+            solver = _cuda_solver_path()
+        except FileNotFoundError:
+            solver = _cpu_solver_path()
+    else:
+        solver = _cpu_solver_path()
+    model_size = SolverPolicy.limits_for(job["analysis"])[0].name
+    analysis = job["analysis"]
+    command = [str(solver), "--select-backend", "--backend", "auto",
+               "--method", request.selected_algorithm, "--model-size", model_size,
+               "--rows", str(int(analysis.get("constraints", 0))),
+               "--cols", str(int(analysis.get("variables", 0))),
+               "--nnz", str(int(analysis.get("nonzeros", 0)))]
+    try:
+        completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=30, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "The C++ backend selector did not finish model analysis in time.") from exc
+    except OSError as exc:
+        raise HTTPException(503, f"Could not start the C++ backend selector: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "Backend selection failed.").strip()
+        raise HTTPException(422, detail[-1200:])
+    output = completed.stdout
+    backend = _capture(r"^Backend:\s*(cpu|cuda)$", output, None, str)
+    reason = _capture(r"^Backend reason:\s*(.+)$", output, None, str)
+    if backend not in {"cpu", "cuda"}:
+        raise HTTPException(502, "The C++ backend selector did not return an execution backend.")
+    return {
+        "job_id": job_id,
+        "problem_type": detected_type,
+        "selected_algorithm": request.selected_algorithm,
+        "backend_requested": "auto",
+        "backend": backend,
+        "reason": reason,
+        "variables": _capture(r"^Variables:\s*(\d+)$", output, 0, int),
+        "constraints": _capture(r"^Constraints:\s*(\d+)$", output, 0, int),
+        "nonzeros": _capture(r"^Nonzeros:\s*(\d+)$", output, 0, int),
+        "cuda_available": bool(info["cuda_available"]),
+    }
 
 
 @app.get("/api/policy/{job_id}")
@@ -952,17 +1323,54 @@ def solve_automatically(request: AutoSolveRequest) -> dict[str, Any]:
     selection = SolverPolicy.select(job["analysis"], device_info())
     configuration = {"job_id": request.job_id, **selection.payload()}
     configuration.pop("fallback_methods")
+    configuration["selected_algorithm"] = selection.method
+    configuration["backend"] = "auto"
     configuration["execution_time_limit_seconds"] = configuration["time_limit_seconds"]
     result = _run_solver(request.job_id, job, configuration)
-    attempts = [{"method": configuration["method"], "backend": configuration["backend"], "status": result["status"], "verification": result["verification"], "reason": "Initial automatic selection"}]
-    if selection.fallback_methods and SolverPolicy.can_fallback(result["status"], result["verification"]):
+    def attempt_record(method: str, backend: str, attempt_result: dict[str, Any], reason: str) -> dict[str, Any]:
+        timings = attempt_result.get("timings") or {}
+        metrics = attempt_result.get("metrics") or {}
+        return {
+            "method": method,
+            "backend": backend,
+            "status": attempt_result["status"],
+            "verification": attempt_result["verification"],
+            "reason": reason,
+            "time_ms": timings.get("backend_total_time_ms"),
+            "presolve_time_ms": timings.get("presolve_time_ms"),
+            "solver_time_ms": timings.get("solver_time_ms"),
+            "postsolve_time_ms": timings.get("postsolve_time_ms"),
+            "verification_time_ms": timings.get("verification_time_ms"),
+            "iterations": metrics.get("iterations"),
+            "message": metrics.get("message"),
+            "estimated_dense_memory_bytes": metrics.get("estimated_dense_memory_bytes"),
+            "dense_memory_guard": metrics.get("dense_memory_guard_triggered"),
+        }
+
+    attempts = [attempt_record(configuration["method"], configuration["backend"], result, "Initial automatic selection")]
+    fallback_reason: str | None = None
+    eligible_for_fallback = bool(selection.fallback_methods) and SolverPolicy.can_fallback(result["status"], result["verification"])
+    if eligible_for_fallback and not SolverPolicy.dense_fallback_is_safe(job["analysis"]):
+        estimated = SolverPolicy.dense_fallback_memory_bytes(job["analysis"])
+        fallback_reason = f"Skipped dense Dual Simplex fallback: estimated workspace {estimated:,} bytes exceeds the {SolverPolicy.DENSE_FALLBACK_MEMORY_BUDGET_BYTES:,}-byte safety budget."
+    elif eligible_for_fallback:
+        limit_seconds = int(configuration.get("time_limit_seconds", 0))
+        elapsed_seconds = time.perf_counter() - request_started
+        remaining_seconds = limit_seconds - elapsed_seconds if limit_seconds > 0 else 0
+        if limit_seconds > 0 and remaining_seconds <= 0:
+            fallback_reason = "Skipped fallback because the automatic request's shared time limit is exhausted."
+    if eligible_for_fallback and fallback_reason is None:
         fallback_method = selection.fallback_methods[0]
-        fallback_backend = "cuda" if fallback_method in {"pdhg", "ipm", "qp"} and device_info().get("cuda_available") else "cpu"
+        fallback_backend = "auto"
         fallback_configuration = {**configuration, "method": fallback_method, "backend": fallback_backend}
+        limit_seconds = int(configuration.get("time_limit_seconds", 0))
+        fallback_configuration["execution_time_limit_seconds"] = max(0.01, limit_seconds - (time.perf_counter() - request_started)) if limit_seconds > 0 else 0
         fallback = _run_solver(request.job_id, job, fallback_configuration)
-        attempts.append({"method": fallback_method, "backend": fallback_configuration["backend"], "status": fallback["status"], "verification": fallback["verification"], "reason": f"Fallback after {result['status']} / verification {result['verification']}"})
+        attempts.append(attempt_record(fallback_method, fallback_configuration["backend"], fallback, f"Fallback after {result['status']} / verification {result['verification']}"))
         result, configuration = fallback, fallback_configuration
-    automation = {"mode": "automatic", "selection": selection.payload(), "attempts": attempts, "final_method": configuration["method"], "final_backend": configuration["backend"]}
+    elif eligible_for_fallback and fallback_reason:
+        attempts.append({"method": selection.fallback_methods[0], "backend": "auto", "status": "SKIPPED", "verification": "N/A", "reason": fallback_reason, "time_ms": 0.0, "iterations": 0})
+    automation = {"mode": "automatic", "selection": selection.payload(), "attempts": attempts, "final_method": configuration["method"], "final_backend": configuration["backend"], "fallback_reason": fallback_reason}
     completed = _complete_result(request.job_id, job, configuration, result, automation)
     _publish_timing_contract(completed, float(job.get("preparation_time_ms", 0.0)) + (time.perf_counter() - request_started) * 1000)
     job["result"] = completed
@@ -1112,64 +1520,91 @@ def delete_benchmark_records(dataset: str) -> dict[str, Any]:
     return {"dataset": suite, "deleted_files": deleted, "deleted_count": len(deleted)}
 
 
-@app.post("/api/benchmarks/compare")
-async def compare_benchmark_model(
-    file: UploadFile = File(...),
-    time_limit_seconds: int = Form(default=60, ge=1, le=3600),
+def _compare_prepared_model(
+    source: Path,
+    solver_path: Path,
+    analysis: dict[str, Any],
+    preparation_time_ms: float,
+    time_limit_seconds: int,
+    directory: Path,
+    active_model_id: str | None = None,
+    selected_configuration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(415, "Supported benchmark formats are MPS, JSON, TXT, and QPLIB.")
-    payload = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(payload) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    """Run the standard comparison pipeline on an already analyzed source model."""
+    model = parse_problem_file(str(solver_path))
     job_id = uuid.uuid4().hex
-    directory = Path(tempfile.mkdtemp(prefix=f"sovereign-compare-{job_id[:8]}-"))
-    source = directory / _safe_name(file.filename or f"benchmark{suffix}")
-    source.write_bytes(payload)
-    try:
-        preparation_started = time.perf_counter()
-        solver_path, analysis = _prepare_model(source, directory)
-        preparation_time_ms = (time.perf_counter() - preparation_started) * 1000
-        model = parse_problem_file(str(solver_path))
-        selection = SolverPolicy.select(analysis, device_info())
-        configuration = {"job_id": job_id, **selection.payload()}
-        configuration.pop("fallback_methods", None)
-        configuration["execution_time_limit_seconds"] = time_limit_seconds
-        configuration["time_limit_seconds"] = time_limit_seconds
-        job = {"directory": directory, "path": solver_path, "source_path": source,
-               "analysis": analysis, "preparation_time_ms": preparation_time_ms, "state": "analyzed"}
+    selection = SolverPolicy.select(analysis, device_info())
+    configuration = {"job_id": job_id, **selection.payload()}
+    configuration.pop("fallback_methods", None)
+    # Compare This Model reruns the same selected Sovereign algorithm and
+    # resolved backend that produced the active result. Standalone uploaded
+    # comparisons use the conservative default method with backend AUTO.
+    if selected_configuration:
+        configuration["method"] = selected_configuration.get("user_selected_algorithm") or selected_configuration.get("method") or selection.method
+        configuration["selected_algorithm"] = configuration["method"]
+        requested_backend = selected_configuration.get("resolved_backend") or selected_configuration.get("backend")
+        configuration["backend"] = requested_backend if requested_backend in {"cpu", "cuda"} else "auto"
+        configuration["presolve"] = bool(selected_configuration.get("presolve", True))
+        configuration["max_iterations"] = int(selected_configuration.get("max_iterations", selection.max_iterations))
+        configuration["max_nodes"] = int(selected_configuration.get("max_nodes", selection.max_nodes))
+    else:
+        configuration["backend"] = "auto"
+    configuration["execution_time_limit_seconds"] = time_limit_seconds
+    configuration["time_limit_seconds"] = time_limit_seconds
+    active_job = JOBS.get(active_model_id) if active_model_id else None
+    cached_result = active_job.get("result") if active_job and active_job.get("state") == "complete" else None
+    reuse_active_result = bool(
+        cached_result
+        and cached_result.get("verification") == "PASS"
+        and str(cached_result.get("status", "")).upper() in {"OPTIMAL", "FEASIBLE"}
+    )
+    job = {"directory": directory, "path": solver_path, "source_path": source,
+           "analysis": analysis, "preparation_time_ms": preparation_time_ms, "state": "analyzed"}
+    if not reuse_active_result:
         JOBS[job_id] = job
-        solve_started = time.perf_counter()
-        sovereign_result = _run_solver(job_id, job, configuration)
-        _publish_timing_contract(sovereign_result, preparation_time_ms + (time.perf_counter() - solve_started) * 1000)
+    try:
+        if reuse_active_result:
+            sovereign_result = cached_result
+            configuration = sovereign_result.get("configuration") or configuration
+        else:
+            solve_started = time.perf_counter()
+            sovereign_result = _run_solver(job_id, job, configuration)
+            _publish_timing_contract(sovereign_result, preparation_time_ms + (time.perf_counter() - solve_started) * 1000)
+        metrics = sovereign_result.get("metrics") or {}
+        actual_backend = str(configuration.get("backend") or "unknown").lower()
+        delegated = actual_backend not in {"cpu", "cuda", "unknown"}
         sovereign = {
-            "solver": "sovereign", "status": sovereign_result.get("status", "FAILED"),
-            "objective": (sovereign_result.get("metrics") or {}).get("objective"),
+            "solver": "website-auto" if delegated else "sovereign",
+            "display_name": (f"Auto → {actual_backend.upper()}"
+                             f"{' Barrier' if metrics.get('resolved_algorithm') == 'gurobi-barrier' else ''}")
+                            if delegated else "Sovereign Native",
+            "status": sovereign_result.get("status", "FAILED"),
+            "objective": metrics.get("objective"),
             "solve_time_ms": (sovereign_result.get("timings") or {}).get("solver_time_ms"),
             "timing": sovereign_result.get("timing"),
-            "iterations": (sovereign_result.get("metrics") or {}).get("iterations"),
-            "nodes": (sovereign_result.get("metrics") or {}).get("nodes_processed"),
-            "best_bound": (sovereign_result.get("metrics") or {}).get("dual_bound"),
-            "relative_gap": (sovereign_result.get("metrics") or {}).get("relative_gap"),
+            "iterations": metrics.get("iterations"), "nodes": metrics.get("nodes_processed"),
+            "best_bound": metrics.get("dual_bound"), "relative_gap": metrics.get("relative_gap"),
             "verification": sovereign_result.get("verification", "N/A"),
-            "backend": configuration.get("backend"), "algorithm": configuration.get("method"),
-            "convexity": (sovereign_result.get("metrics") or {}).get("convexity"),
-            "primal_residual": (sovereign_result.get("metrics") or {}).get("primal_residual"),
-            "dual_residual": (sovereign_result.get("metrics") or {}).get("dual_residual"),
-            "complementarity_residual": (sovereign_result.get("metrics") or {}).get("complementarity_residual"),
-            "failure_reason": (sovereign_result.get("metrics") or {}).get("message"),
+            "backend": actual_backend, "algorithm": metrics.get("resolved_algorithm") or configuration.get("method"),
+            "convexity": metrics.get("convexity"), "primal_residual": metrics.get("primal_residual"),
+            "dual_residual": metrics.get("dual_residual"),
+            "complementarity_residual": metrics.get("complementarity_residual"),
+            "failure_reason": metrics.get("message"),
         }
         references = [solve_comparator(name, model, float(time_limit_seconds)) for name in ("highs", "gurobi", "cplex")]
+        for reference in references:
+            if reference.get("solver") in {"highs", "gurobi", "cplex"}:
+                reference["display_name"] = f"{reference['solver'].upper()} · Default settings"
         solvers = [sovereign, *references]
         objective_tolerance = 1e-6
-        available_objectives = [row for row in solvers if row.get("verification") == "PASS" and isinstance(row.get("objective"), (int, float))]
+        available_objectives = [row for row in solvers if row.get("verification") == "PASS"
+                                and isinstance(row.get("objective"), (int, float))]
         agreement = None
         comparisons = []
         if len(available_objectives) > 1:
             base = sovereign.get("objective")
             for reference in available_objectives:
-                if reference["solver"] == "sovereign" or not isinstance(base, (int, float)):
+                if reference is sovereign or not isinstance(base, (int, float)):
                     continue
                 difference = abs(float(base) - float(reference["objective"]))
                 relative = difference / max(1.0, abs(float(base)), abs(float(reference["objective"])))
@@ -1184,7 +1619,9 @@ async def compare_benchmark_model(
         except Exception:
             ram_bytes = None
         return {
-            "instance": source.name, "problem_type": analysis.get("problem_type"),
+            "instance": source.name, "active_model_id": active_model_id,
+            "reused_active_solve": reuse_active_result,
+            "problem_type": analysis.get("problem_type"),
             "model": {key: analysis.get(key) for key in ("variables", "constraints", "nonzeros", "sparsity", "objective_sense")},
             "time_limit_seconds": time_limit_seconds, "hardware": {
                 "cpu": platform.processor() or None, "gpu": env.get("gpu_name"),
@@ -1192,16 +1629,69 @@ async def compare_benchmark_model(
                 "ram_bytes": ram_bytes, "os": platform.platform(),
             },
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "fairness": "Same input model, same machine, same wall-clock time limit; solver settings and algorithms remain solver-specific.",
-            "solver_results": solvers, "objective_agreement": agreement,
-            "objective_comparisons": comparisons,
+            "fairness": ("The Auto timing is reused from the completed solve; reference solvers were independently timed on the same input and machine with the selected time limit. Solver settings and algorithms remain solver-specific."
+                         if reuse_active_result else
+                         "Same input model, same machine, same wall-clock time limit; solver settings and algorithms remain solver-specific."),
+            "solver_results": solvers, "objective_agreement": agreement, "objective_comparisons": comparisons,
         }
+    finally:
+        if not reuse_active_result:
+            JOBS.pop(job_id, None)
+
+
+@app.post("/api/benchmarks/compare")
+async def compare_benchmark_model(
+    file: UploadFile = File(...),
+    time_limit_seconds: int = Form(default=60, ge=1, le=3600),
+) -> dict[str, Any]:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(415, "Supported benchmark formats are MPS, JSON, TXT, and QPLIB.")
+    payload = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    directory = Path(tempfile.mkdtemp(prefix="sovereign-compare-"))
+    source = directory / _safe_name(file.filename or f"benchmark{suffix}")
+    try:
+        source.write_bytes(payload)
+        preparation_started = time.perf_counter()
+        solver_path, analysis = _prepare_model(source, directory)
+        preparation_time_ms = (time.perf_counter() - preparation_started) * 1000
+        return _compare_prepared_model(source, solver_path, analysis, preparation_time_ms,
+                                       time_limit_seconds, directory)
     except (ValueError, OSError, UnicodeError) as exc:
-        shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(422, f"Benchmark model could not be prepared: {exc}") from exc
     finally:
         shutil.rmtree(directory, ignore_errors=True)
-        JOBS.pop(job_id, None)
+
+
+@app.post("/api/benchmarks/compare-active")
+def compare_active_model(request: ActiveModelCompareRequest) -> dict[str, Any]:
+    active = JOBS.get(request.model_id)
+    if active is None:
+        raise HTTPException(404, "The active model is no longer available. Select or upload it again.")
+    if active.get("state") == "cancelled":
+        raise HTTPException(409, "The active model was cancelled and is no longer available. Select it again.")
+    if active.get("state") == "solving":
+        raise HTTPException(409, "Wait for the current solve to finish before comparing solvers.")
+    original_source = Path(active.get("source_path", ""))
+    if not original_source.is_file():
+        raise HTTPException(410, "The active model file is no longer available. Select it again.")
+    directory = Path(tempfile.mkdtemp(prefix="sovereign-active-compare-"))
+    source = directory / _safe_name(original_source.name)
+    try:
+        shutil.copyfile(original_source, source)
+        preparation_started = time.perf_counter()
+        solver_path, analysis = _prepare_model(source, directory)
+        preparation_time_ms = (time.perf_counter() - preparation_started) * 1000
+        active_configuration = active.get("configuration") or (active.get("result") or {}).get("configuration")
+        return _compare_prepared_model(source, solver_path, analysis, preparation_time_ms,
+                                       request.time_limit_seconds, directory, request.model_id,
+                                       active_configuration)
+    except (ValueError, OSError, UnicodeError) as exc:
+        raise HTTPException(422, f"Active benchmark model could not be prepared: {exc}") from exc
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 @app.get("/")

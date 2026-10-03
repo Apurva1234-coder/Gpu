@@ -39,8 +39,9 @@ def test_datasets():
                 presolve_status = "N/A"
                 if cls == "LP":
                     try:
-                        p_model, _ = presolve(model)
-                        presolve_status = f"{len(p_model.variables)}v/{len(p_model.constraints)}c"
+                        presolve_result = presolve(model)
+                        p_model = presolve_result.model
+                        presolve_status = f"{presolve_result.status}: {len(p_model.variables)}v/{len(p_model.constraints)}c"
                     except Exception as pe:
                         presolve_status = f"err: {pe}"
                 

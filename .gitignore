@@ -7,6 +7,12 @@ venv/
 *.exe
 /cpp_solver/build/
 /cpp_solver/build-cuda/
+/cpp_solver/build-route-cpu/
+/cpp_solver/build-route-cuda/
+/cpp_solver/build-lp-audit/
+/cpp_solver/build-lp-audit-msvc/
+/cpp_solver/build-lp-phase2-x64/
+/cpp_solver/build-lp-phase3-debug/
 /results/
 # Benchmark corpora are acquired locally and can be several gigabytes.
 /benchmarks/netlib/*.mps.txt

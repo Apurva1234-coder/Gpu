@@ -57,7 +57,10 @@ def validate_payload(data: Dict[str, Any]) -> OptimizationModel:
             raise ValueError(f"Lower bound cannot exceed upper bound for {name}.")
         normalized_bounds[name] = (bound[0], bound[1])
     from .model import Variable, Constraint
-    return OptimizationModel(data["name"].strip(), sense, [Variable(v["name"], v.get("type", "continuous").lower()) for v in variables], {k: float(v) for k, v in data["objective"].items()}, [Constraint(c.get("name", f"c{i}"), {k: float(v) for k, v in c["coefficients"].items()}, c["operator"], float(c["rhs"])) for i, c in enumerate(constraints, 1)], {k: float(v) for k, v in quadratic.items()}, normalized_bounds)
+    objective_constant = data.get("objective_constant", 0.0)
+    if not isinstance(objective_constant, (int, float)):
+        raise ValueError("objective_constant must be numeric.")
+    return OptimizationModel(data["name"].strip(), sense, [Variable(v["name"], v.get("type", "continuous").lower()) for v in variables], {k: float(v) for k, v in data["objective"].items()}, [Constraint(c.get("name", f"c{i}"), {k: float(v) for k, v in c["coefficients"].items()}, c["operator"], float(c["rhs"])) for i, c in enumerate(constraints, 1)], {k: float(v) for k, v in quadratic.items()}, normalized_bounds, float(objective_constant))
 
 
 def _validate_coefficients(coefficients, name_set, label):

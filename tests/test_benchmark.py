@@ -15,12 +15,37 @@ ROOT = Path(__file__).resolve().parents[1]
 FAKE_OUTPUT = """MODEL fixture
 Backend: CPU
 Presolve: ON
+Presolve time budget ms: 500
+Presolve termination: diminishing_returns
 Parse time ms: 0.1
 Presolve time ms: 0.0
+Presolve pass: 1 time_ms=0.2 variables=3->2 constraints=2->1 nnz=4->2 bound_tightenings=1 fixed_variables=1 substitutions=0 singleton_reductions=0 redundant_rows=1 reduction_percent=40.0
+Standardization time ms: 0.3
+Solve pipeline time ms: 0.7
+Solve time ms: 0.4
+Standardized rows: 1
+Standardized columns: 2
+Standardized nonzeros: 2
 Final variables: 1
 Final constraints: 1
 Presolve reductions: 0
 Presolve fallback: YES
+Estimated dense memory bytes: 512000000
+Dense memory budget bytes: 268435456
+Dense memory guard: TRIGGERED
+Sparse pricing time ms: 1.25
+Sparse basis solve time ms: 2.5
+Sparse Devex time ms: 3.75
+Sparse factorization time ms: 5
+Sparse ratio test time ms: 6.25
+Sparse lexicographic time ms: 0.75
+Sparse refactorizations: 4
+Sparse pivots: 19
+Sparse lexicographic solves: 7
+Sparse Bland fallback: YES
+Primal residual: 1e-9
+Dual residual: 2e-9
+Complementarity residual: 3e-9
 Problem Type: LP
 Status: OPTIMAL
 Iterations: 2
@@ -32,6 +57,17 @@ Primal: 15 17.5
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_presolve_pass_and_standardization_telemetry_is_parsed(self):
+        passes = benchmark._presolve_pass_stats(FAKE_OUTPUT)
+        self.assertEqual(len(passes), 1)
+        self.assertEqual(passes[0]["pass"], 1)
+        self.assertEqual(passes[0]["variables"], "3->2")
+        self.assertEqual(passes[0]["fixed_variables"], 1)
+        self.assertEqual(benchmark._first_number(benchmark._field(FAKE_OUTPUT, "Standardization time ms")), 0.3)
+        self.assertEqual(benchmark._int(benchmark._field(FAKE_OUTPUT, "Standardized nonzeros")), 2)
+        self.assertEqual(benchmark._field(FAKE_OUTPUT, "Presolve termination"), "diminishing_returns")
+        self.assertEqual(benchmark._first_number(benchmark._field(FAKE_OUTPUT, "Presolve time budget ms")), 500.0)
+
     def test_netlib_mps_fixture_loads_as_lp(self):
         model = parse_problem_file(str(ROOT / "examples" / "afiro.mps"))
         self.assertGreater(len(model.variables), 0)
@@ -198,6 +234,28 @@ ENDATA
     def test_presolve_fallback_is_captured(self):
         result = benchmark._parse_solver_output("Status: OPTIMAL\nPresolve fallback: YES\n", 0)
         self.assertTrue(result["presolve_fallback"])
+
+    def test_dense_memory_guard_telemetry_is_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["estimated_dense_memory_bytes"], 512000000.0)
+        self.assertEqual(result["dense_memory_budget_bytes"], 268435456)
+        self.assertTrue(result["dense_memory_guard_triggered"])
+
+    def test_sparse_simplex_profile_is_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["sparse_pricing_ms"], 1.25)
+        self.assertEqual(result["sparse_factorization_ms"], 5.0)
+        self.assertEqual(result["sparse_lexicographic_ms"], 0.75)
+        self.assertEqual(result["sparse_refactorizations"], 4)
+        self.assertEqual(result["sparse_pivots"], 19)
+        self.assertEqual(result["sparse_lexicographic_solves"], 7)
+        self.assertTrue(result["sparse_bland_fallback_triggered"])
+
+    def test_primal_dual_and_complementarity_residuals_are_captured(self):
+        result = benchmark._parse_solver_output(FAKE_OUTPUT, 0)
+        self.assertEqual(result["primal_residual_reported"], 1e-9)
+        self.assertEqual(result["dual_residual"], 2e-9)
+        self.assertEqual(result["complementarity_residual"], 3e-9)
 
     def test_original_model_verification_bounds_integrality_and_objective(self):
         model = parse_problem_file(str(ROOT / "examples" / "milp_relaxation.json"))

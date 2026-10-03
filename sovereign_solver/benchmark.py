@@ -34,7 +34,12 @@ CSV_FIELDS = [
     "presolve_enabled", "status", "objective_value", "best_primal_bound",
     "best_dual_bound", "absolute_gap", "relative_gap", "iterations", "lp_solves",
     "nodes_created", "nodes_processed", "nodes_pruned", "parse_time_ms", "model_preparation_time_ms",
-    "presolve_time_ms", "solve_time_ms", "postsolve_time_ms",
+    "presolve_time_ms", "standardization_time_ms", "solve_time_ms", "solve_pipeline_time_ms",
+    "standardized_rows", "standardized_columns", "standardized_nonzeros", "postsolve_time_ms",
+    "presolve_pass_stats", "presolve_termination_reason", "presolve_time_budget_ms",
+    "estimated_dense_memory_bytes", "dense_memory_budget_bytes", "dense_memory_guard_triggered",
+    "sparse_pricing_ms", "sparse_basis_solve_ms", "sparse_devex_ms", "sparse_factorization_ms",
+    "sparse_ratio_test_ms", "sparse_lexicographic_ms", "sparse_refactorizations", "sparse_pivots", "sparse_lexicographic_solves", "sparse_bland_fallback_triggered",
     "verification_time_ms", "total_time_ms", "primal_residual", "dual_residual",
     "complementarity_residual", "integer_feasible", "verification_pass",
     "convexity", "hessian_type", "gpu_available", "gpu_device", "gpu_used",
@@ -58,6 +63,23 @@ def _float(text: str | None) -> float | None:
 def _field(output: str, label: str) -> str | None:
     match = re.search(rf"(?im)^\s*{re.escape(label)}\s*:\s*(.*?)\s*$", output)
     return match.group(1) if match else None
+
+
+def _presolve_pass_stats(output: str) -> list[dict[str, Any]]:
+    """Decode the C++ per-pass presolve profile emitted by the CLI."""
+    records: list[dict[str, Any]] = []
+    for match in re.finditer(r"(?im)^Presolve pass:\s*(\d+)\s+([^\r\n]+)$", output):
+        record: dict[str, Any] = {"pass": int(match.group(1))}
+        for key, value in re.findall(r"([a-z_]+)=([^\s]+)", match.group(2)):
+            if "->" in value:
+                record[key] = value
+                continue
+            try:
+                record[key] = float(value) if "." in value or "e" in value.lower() else int(value)
+            except ValueError:
+                continue
+        records.append(record)
+    return records
 
 
 def _vector(output: str) -> list[float] | None:
@@ -153,7 +175,7 @@ def verify_original(model, primal: list[float] | None, tolerance: float = 1e-7,
 def _method_for(problem_class: str, method: str) -> tuple[list[str], str]:
     if method == "auto":
         method = {"LP": "revised-simplex", "MILP": "milp", "QP": "qp"}.get(problem_class, "auto")
-    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm", "pdhg"}:
+    if problem_class == "MILP" and method in {"revised-simplex", "dual-simplex", "ipm"}:
         return ["--method", "milp", "--lp-method", method], "branch-and-bound/" + method
     return ["--method", method], method
 
@@ -224,11 +246,24 @@ def _parse_solver_output(output: str, returncode: int) -> dict[str, Any]:
         "nodes_pruned": _int(_field(output, "Nodes Pruned")),
         "reported_verification": (_field(output, "Verification") or "").upper() == "PASS",
         "presolve_fallback": (_field(output, "Presolve fallback") or "").upper() == "YES",
+        "estimated_dense_memory_bytes": _first_number(_field(output, "Estimated dense memory bytes")),
+        "dense_memory_budget_bytes": _nonnegative_int(_field(output, "Dense memory budget bytes")),
+        "dense_memory_guard_triggered": (_field(output, "Dense memory guard") or "").upper() == "TRIGGERED",
+        "sparse_pricing_ms": _first_number(_field(output, "Sparse pricing time ms")),
+        "sparse_basis_solve_ms": _first_number(_field(output, "Sparse basis solve time ms")),
+        "sparse_devex_ms": _first_number(_field(output, "Sparse Devex time ms")),
+        "sparse_factorization_ms": _first_number(_field(output, "Sparse factorization time ms")),
+        "sparse_ratio_test_ms": _first_number(_field(output, "Sparse ratio test time ms")),
+        "sparse_lexicographic_ms": _first_number(_field(output, "Sparse lexicographic time ms")),
+        "sparse_refactorizations": _nonnegative_int(_field(output, "Sparse refactorizations")),
+        "sparse_pivots": _nonnegative_int(_field(output, "Sparse pivots")),
+        "sparse_lexicographic_solves": _nonnegative_int(_field(output, "Sparse lexicographic solves")),
+        "sparse_bland_fallback_triggered": (_field(output, "Sparse Bland fallback") or "").upper() == "YES",
         "primal": _vector(output),
         "primal_names": _names(output),
         "primal_residual_reported": _first_number(_field(output, "Primal residual"), _field(output, "Feasibility")),
         "dual_residual": _float(_field(output, "Dual residual")),
-        "complementarity_residual": _float(_field(output, "Complementarity")),
+        "complementarity_residual": _first_number(_field(output, "Complementarity residual"), _field(output, "Complementarity")),
         "convexity": _field(output, "Convexity"),
         "hessian_type": _field(output, "Hessian"),
         "failure_reason": None if status in {"OPTIMAL", "FEASIBLE", "INFEASIBLE", "UNBOUNDED"} else (output.strip()[-1200:] or f"solver exited {returncode}"),
@@ -283,8 +318,30 @@ def _invoke(solver: Path, instance: Path, method_args: list[str], backend: str,
             result = _parse_solver_output(output, proc.returncode)
             parse_ms = _first_number(_field(output, "Parse time ms"))
             presolve_ms = _first_number(_field(output, "Presolve time ms"))
+            standardization_ms = _first_number(_field(output, "Standardization time ms"))
             reported_solve_ms = _first_number(_field(output, "Solve time ms"))
             result.update({"solve_time_ms": reported_solve_ms,
+                           "solve_pipeline_time_ms": _first_number(_field(output, "Solve pipeline time ms")),
+                           "standardization_time_ms": standardization_ms,
+                           "standardized_rows": _int(_field(output, "Standardized rows")),
+                           "standardized_columns": _int(_field(output, "Standardized columns")),
+                           "standardized_nonzeros": _int(_field(output, "Standardized nonzeros")),
+                           "presolve_pass_stats": _presolve_pass_stats(output),
+                           "presolve_termination_reason": _field(output, "Presolve termination"),
+                           "presolve_time_budget_ms": _first_number(_field(output, "Presolve time budget ms")),
+                           "estimated_dense_memory_bytes": _first_number(_field(output, "Estimated dense memory bytes")),
+                           "dense_memory_budget_bytes": _nonnegative_int(_field(output, "Dense memory budget bytes")),
+                           "dense_memory_guard_triggered": (_field(output, "Dense memory guard") or "").upper() == "TRIGGERED",
+                           "sparse_pricing_ms": _first_number(_field(output, "Sparse pricing time ms")),
+                           "sparse_basis_solve_ms": _first_number(_field(output, "Sparse basis solve time ms")),
+                           "sparse_devex_ms": _first_number(_field(output, "Sparse Devex time ms")),
+                           "sparse_factorization_ms": _first_number(_field(output, "Sparse factorization time ms")),
+                           "sparse_ratio_test_ms": _first_number(_field(output, "Sparse ratio test time ms")),
+                           "sparse_lexicographic_ms": _first_number(_field(output, "Sparse lexicographic time ms")),
+                           "sparse_refactorizations": _nonnegative_int(_field(output, "Sparse refactorizations")),
+                           "sparse_pivots": _nonnegative_int(_field(output, "Sparse pivots")),
+                           "sparse_lexicographic_solves": _nonnegative_int(_field(output, "Sparse lexicographic solves")),
+                           "sparse_bland_fallback_triggered": (_field(output, "Sparse Bland fallback") or "").upper() == "YES",
                            "postsolve_time_ms": _first_number(_field(output, "Postsolve time ms")),
                            "cli_verification_time_ms": _first_number(_field(output, "Verification time ms")), "cli_time_ms": elapsed,
                            "build_compiler": _field(output, "Build compiler"),
@@ -450,7 +507,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows({key: json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else value
+                          for key, value in row.items()} for row in rows)
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -506,12 +564,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg"}:
+            if classification == "LP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not an LP method"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
                 continue
-            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
+            if classification == "MILP" and args.method not in {"auto", "revised-simplex", "dual-simplex", "ipm", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"}:
                 row.update({"status": "UNSUPPORTED", "failure_reason": f"method {args.method} is not supported for MILP"})
                 row["total_time_ms"] = (time.perf_counter_ns() - instance_start) / 1e6
                 rows.append(row)
@@ -535,7 +593,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             objective = check["objective"] if check["objective"] is not None else result.get("objective_value")
             failure_reason = row.get("failure_reason") or _verification_failure_reason(
                 result, check, candidate_status, objective_consistent)
-            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
+            row.update({k: result.get(k) for k in ("iterations", "lp_solves", "nodes_created", "nodes_processed", "nodes_pruned", "solve_time_ms", "solve_pipeline_time_ms", "standardization_time_ms", "standardized_rows", "standardized_columns", "standardized_nonzeros", "presolve_pass_stats", "presolve_termination_reason", "presolve_time_budget_ms", "estimated_dense_memory_bytes", "dense_memory_budget_bytes", "dense_memory_guard_triggered", "sparse_pricing_ms", "sparse_basis_solve_ms", "sparse_devex_ms", "sparse_factorization_ms", "sparse_ratio_test_ms", "sparse_lexicographic_ms", "sparse_refactorizations", "sparse_pivots", "sparse_lexicographic_solves", "sparse_bland_fallback_triggered", "total_time_ms", "dual_residual", "complementarity_residual", "convexity", "hessian_type")})
             row["presolve_fallback"] = result.get("presolve_fallback", False)
             row["presolve_applied_to_solve"] = (
                 classification == "LP" and not args.no_presolve and not row["presolve_fallback"]
@@ -566,11 +624,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 external_rows.append(reference)
                 row["reference_solver_status"] = reference.get("reference_solver_status")
             if args.compare_backends:
-                gpu_supported = classification == "QP" or (classification == "LP" and args.method in {"ipm", "pdhg"})
+                gpu_supported = classification == "QP" or (classification == "LP" and args.method == "ipm")
                 pair = {"dataset": args.dataset, "instance": str(path), "supported": gpu_supported,
                         "gpu_available": gpu["available"], "gpu_device": gpu["device"], "gpu_used": False,
                         "status": "GPU_UNSUPPORTED" if not gpu_supported else "NOT_AVAILABLE" if not gpu["available"] else None,
-                        "gpu_reason": "CUDA kernels are supported for IPM/QP and PDHG LP only" if not gpu_supported else ""}
+                        "gpu_reason": "CUDA kernels are supported for IPM LP and QP only" if not gpu_supported else ""}
                 if gpu_supported and gpu["available"]:
                     cpu = _invoke(solver, path, method_args, "cpu", args.device, args.time_limit, no_presolve=args.no_presolve)
                     cuda = _invoke(solver, path, method_args, "cuda", args.device, args.time_limit, no_presolve=args.no_presolve)
@@ -614,6 +672,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "parsing_ms": row.get("parse_time_ms"),
             "model_preparation_ms": row.get("model_preparation_time_ms"),
             "presolve_ms": row.get("presolve_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
             "solver_ms": row.get("solve_time_ms"),
             "postsolve_ms": row.get("postsolve_time_ms"),
             "verification_ms": row.get("verification_time_ms"),
@@ -626,6 +685,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "parsing_ms": row.get("parse_time_ms"),
             "model_preparation_ms": row.get("model_preparation_time_ms"),
             "presolve_ms": row.get("presolve_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
+            "standardization_ms": row.get("standardization_time_ms"),
             "solver_ms": row.get("solve_time_ms"),
             "postsolve_ms": row.get("postsolve_time_ms"),
             "verification_ms": row.get("verification_time_ms"),
@@ -701,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True, choices=("netlib", "miplib", "qplib", "mittelmann", "examples", "custom"))
     parser.add_argument("--input", required=True, help="Directory containing locally available instances")
     parser.add_argument("--solver", required=True, help="Path to sovereign_presolve_cli executable")
-    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "pdhg", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
+    parser.add_argument("--method", default="auto", choices=("auto", "revised-simplex", "dual-simplex", "ipm", "qp", "milp", "lp-relaxation", "cutting-plane", "feasibility-pump"))
     parser.add_argument("--backend", default="cpu", choices=("cpu", "cuda", "auto"))
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--tier", choices=("quick", "standard", "full"), default="quick")

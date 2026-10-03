@@ -5,6 +5,7 @@ from sovereign_solver.classification import classify_model
 from sovereign_solver.parser import parse_problem_file
 from sovereign_solver.validation import validate_payload
 from sovereign_solver.presolve import presolve
+from webui.app import ROOT, _run_solver, parse_solver_output
 
 
 def payload(variable_type="continuous", quadratic=None):
@@ -12,6 +13,95 @@ def payload(variable_type="continuous", quadratic=None):
 
 
 class SolverPrototypeTests(unittest.TestCase):
+    def test_milp_telemetry_output_is_parsed(self):
+        output = """Status: TIME_LIMIT
+MILP Model Preparation time ms: 12.5
+Root LP time ms: 3.25
+Root LP iterations: 14
+Root fractional integer variables: 2
+Feasibility Pump time ms: 7.5
+Feasibility Pump LP solves: 3
+Feasibility Pump iterations: 2
+Branch-and-Bound time ms: 20
+Node selection time ms: 1.5
+Node model/update time ms: 2.5
+Node LP time ms: 15
+Branching time ms: 0.25
+Pruning time ms: 0.5
+Incumbent updates: 1
+Maximum depth: 4
+Peak open nodes: 7
+Cuts generated: 0
+Cuts accepted: 0
+Cuts rejected: 0
+Warm starts attempted: 0
+Warm starts successful: 0
+Cold starts: 5
+Total MILP solver time ms: 31
+Nodes Created: 6
+Nodes Processed: 5
+Nodes Pruned: 1
+LP Solves: 5
+LP Iterations: 24
+Verification: PASS
+Objective: 5
+Primal Bound: 5
+Dual Bound: 4
+Absolute Gap: 1
+Relative Gap: 0.2
+"""
+        result = parse_solver_output(output, 40)
+        self.assertEqual(result["status"], "TIME_LIMIT_WITH_INCUMBENT")
+        self.assertEqual(result["metrics"]["root_lp_iterations"], 14)
+        self.assertEqual(result["metrics"]["feasibility_pump_lp_solves"], 3)
+        self.assertEqual(result["metrics"]["nodes_processed"], 5)
+        self.assertEqual(result["timing"]["milp_stages_ms"]["node_lp"], 15)
+
+    def test_milp_python_backend_uses_release_solver_and_returns_verified_result(self):
+        model_path = ROOT / "examples" / "milp_relaxation.json"
+        self.assertTrue(model_path.is_file())
+        job = {
+            "path": model_path,
+            "preparation_time_ms": 0.0,
+            "analysis": {"problem_type": "MILP", "variables": 2, "constraints": 1, "nonzeros": 2},
+        }
+        configuration = {
+            "method": "milp", "selected_algorithm": "milp", "backend": "cpu",
+            "presolve": True, "time_limit_seconds": 10, "execution_time_limit_seconds": 10,
+            "max_iterations": 10000, "max_nodes": 10000,
+        }
+        result = _run_solver("milp-backend-integration", job, configuration)
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["verification"], "PASS")
+        self.assertIsNotNone(result["metrics"]["objective"])
+        self.assertIsNotNone(result["timings"]["solver_time_ms"])
+        self.assertEqual(result["metrics"]["build_mode"], "RELEASE")
+        self.assertIn("build-route-cpu", configuration["solver_executable"])
+
+    def test_small_flugpl_milp_returns_verified_result_through_python_backend(self):
+        model_path = ROOT / "datasets" / "milp" / "small" / "flugpl.mps"
+        self.assertTrue(model_path.is_file())
+        job = {
+            "path": model_path,
+            "preparation_time_ms": 0.0,
+            "analysis": {"problem_type": "MILP", "variables": 18, "constraints": 18, "nonzeros": 46},
+        }
+        configuration = {
+            "method": "milp", "selected_algorithm": "milp", "backend": "auto",
+            "presolve": True, "time_limit_seconds": 10, "execution_time_limit_seconds": 10,
+            "max_iterations": 25000, "max_nodes": 10000,
+        }
+        result = _run_solver("small-flugpl-regression", job, configuration)
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["verification"], "PASS")
+        self.assertAlmostEqual(result["metrics"]["objective"], 1201500.0, places=4)
+        self.assertIsNotNone(result["timings"]["solver_time_ms"])
+        self.assertEqual(result["metrics"]["build_mode"], "RELEASE")
+        self.assertEqual(result["metrics"]["backend"], "cpu")
+        self.assertIn("CUDA is available but is not used", result["metrics"]["backend_reason"])
+        self.assertEqual(result["metrics"]["warm_starts_attempted"], 0)
+        self.assertEqual(result["metrics"]["cold_starts"], result["metrics"]["lp_solves"])
+
     def test_lp(self):
         self.assertEqual(classify_model(validate_payload(payload())).problem_type, "LP")
 
@@ -88,8 +178,37 @@ minimize
         self.assertEqual(len(model.constraints), 1)
         self.assertEqual(sum(len(row.coefficients) for row in model.constraints), 2)
         self.assertEqual(model.quadratic_terms, {"x1": 2.0, "x2": 4.0})
+        self.assertEqual(model.objective_constant, 0.0)
         self.assertEqual(model.bounds["x1"], (0.0, None))
         self.assertEqual(model.bounds["x2"], (None, 5.0))
+
+    def test_qplib_preserves_nonzero_objective_constant(self):
+        content = """QPLIB_OFFSET
+DCL
+minimize
+1
+0
+1
+1 1 2
+0
+0
+5.5
+0
+1e20
+0
+0
+0
+0
+-1e20
+0
+1e20
+0
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "QPLIB_OFFSET.qplib"
+            path.write_text(content, encoding="utf-8")
+            model = parse_problem_file(str(path))
+        self.assertEqual(model.objective_constant, 5.5)
 
     def test_mps_lp(self):
         model = self._parse_mps("""NAME TESTLP
@@ -107,6 +226,19 @@ ENDATA
 """)
         self.assertEqual(classify_model(model).problem_type, "LP")
         self.assertEqual(model.constraints[0].operator, "<=")
+
+    def test_mps_default_rhs_set_name_is_not_treated_as_a_section_header(self):
+        model = self._parse_mps("""NAME TESTRHS
+ROWS
+ N COST
+ L LIMIT
+COLUMNS
+ X COST 1 LIMIT 1
+RHS
+ RHS LIMIT 7
+ENDATA
+""")
+        self.assertEqual(model.constraints[0].rhs, 7.0)
 
     def test_mps_integer_marker_is_milp(self):
         model = self._parse_mps("""NAME TESTMILP
