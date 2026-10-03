@@ -12,7 +12,7 @@ Sovereign is an optimization engine that owns its model parsing, presolve, solve
 
 - [Overview](#overview)
 - [Why Sovereign](#why-sovereign)
-- [Target / Ideal Solver Architecture](#target--ideal-solver-architecture)
+- [Target Architecture (Ideal)](#target-architecture-ideal)
 - [Current Implementation](#current-implementation)
 - [LP](#linear-programming)
 - [MILP](#mixed-integer-linear-programming)
@@ -39,7 +39,7 @@ The project provides a C++17 CLI as its authoritative solver interface. Python s
 
 The project is intended to make solver behavior inspectable: algorithm selection, CPU/CUDA backend, iteration or search telemetry, timing stages, and original-model verification are exposed in CLI or benchmark results. The benchmark runner records unsuccessful, unsupported, and timed-out cases so that the evidence remains reproducible.
 
-## Target / Ideal Solver Architecture
+## Target Architecture (Ideal)
 
 > This diagram represents the intended end-state architecture. Some components are future work, not implemented features. The current supported subset is shown separately below.
 
@@ -247,10 +247,8 @@ These are future directions, not current capabilities.
 
 ## Documentation
 
-- [Benchmark runner and dataset notes](benchmarks/README.md)
+- [Dataset-by-dataset results for every checked-in model](benchmarks/DATASET_BENCHMARK_REPORT.md)
+- [Benchmark guide, input provenance, and report index](benchmarks/README.md)
 - [Final verified benchmark report](benchmarks/FINAL_SOLVER_BENCHMARK_REPORT.md)
-- [LP/MILP optimization report and timeout evidence](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md)
-- [AFIRO LP baseline](benchmarks/LP_SMALL_FULL_BENCHMARK_20261003.md)
-- [QPLIB_9002 QP baseline and fix](benchmarks/QP_SMALL_BASELINE_AND_FIX_20261003.md)
-- [Live demo setup and rehearsal](docs/LIVE_DEMO.md)
-- [Native solver source](cpp_solver/)
+- [LP/MILP optimization results and timeout evidence](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md)
+- [LP algorithm and presolve audit archive](benchmarks/LP_AUDIT.md)
