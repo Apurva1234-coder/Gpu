@@ -502,9 +502,26 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "standardization_time_ms": _capture(r"^Standardization time ms:\s*([^\r\n]+)$", output, None, float),
         "solve_pipeline_time_ms": _capture(r"^Solve pipeline time ms:\s*([^\r\n]+)$", output, None, float),
         "solver_time_ms": _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_model_preparation_time_ms": _capture(r"^MILP Model Preparation time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_time_ms": _capture(r"^Root LP time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_standardization_time_ms": _capture(r"^Root LP standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_pricing_time_ms": _capture(r"^Root LP sparse pricing time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_basis_solve_time_ms": _capture(r"^Root LP sparse basis solve time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_root_lp_sparse_factorization_time_ms": _capture(r"^Root LP sparse factorization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_feasibility_pump_time_ms": _capture(r"^Feasibility Pump time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_branch_and_bound_time_ms": _capture(r"^Branch-and-Bound time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_selection_time_ms": _capture(r"^Node selection time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_model_update_time_ms": _capture(r"^Node model/update time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_time_ms": _capture(r"^Node LP time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_standardization_time_ms": _capture(r"^Node LP standardization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_node_lp_sparse_factorization_time_ms": _capture(r"^Node LP sparse factorization time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_branching_time_ms": _capture(r"^Branching time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_pruning_time_ms": _capture(r"^Pruning time ms:\s*([^\r\n]+)$", output, None, float),
+        "milp_total_solver_time_ms": _capture(r"^Total MILP solver time ms:\s*([^\r\n]+)$", output, None, float),
         "postsolve_time_ms": _capture(r"^Postsolve time ms:\s*([^\r\n]+)$", output, None, float),
         "verification_time_ms": _capture(r"^Verification time ms:\s*([^\r\n]+)$", output, None, float),
         "backend_total_time_ms": total_ms,
+        "solver_time_source": "cpp_solver" if _capture(r"^Solve time ms:\s*([^\r\n]+)$", output, None) is not None else "unavailable",
         "model_preparation_time_ms": None,
     }
     timing = {
@@ -516,6 +533,24 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "postsolve_ms": timings["postsolve_time_ms"],
         "verification_ms": timings["verification_time_ms"],
         "backend_total_ms": timings["backend_total_time_ms"],
+        "milp_stages_ms": {
+            "model_preparation": timings["milp_model_preparation_time_ms"],
+            "root_lp": timings["milp_root_lp_time_ms"],
+            "root_lp_standardization": timings["milp_root_lp_standardization_time_ms"],
+            "root_lp_sparse_pricing": timings["milp_root_lp_sparse_pricing_time_ms"],
+            "root_lp_sparse_basis_solve": timings["milp_root_lp_sparse_basis_solve_time_ms"],
+            "root_lp_sparse_factorization": timings["milp_root_lp_sparse_factorization_time_ms"],
+            "feasibility_pump": timings["milp_feasibility_pump_time_ms"],
+            "branch_and_bound": timings["milp_branch_and_bound_time_ms"],
+            "node_selection": timings["milp_node_selection_time_ms"],
+            "node_model_update": timings["milp_node_model_update_time_ms"],
+            "node_lp": timings["milp_node_lp_time_ms"],
+            "node_lp_standardization": timings["milp_node_lp_standardization_time_ms"],
+            "node_lp_sparse_factorization": timings["milp_node_lp_sparse_factorization_time_ms"],
+            "branching": timings["milp_branching_time_ms"],
+            "pruning": timings["milp_pruning_time_ms"],
+            "total_solver": timings["milp_total_solver_time_ms"],
+        },
     }
     names = (_capture(r"^Primal Names:\s*(.*)$", output, "") or "").split()
     primal_line = _capture(r"^Primal:\s*(.*)$", output, "") or ""
@@ -562,8 +597,47 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "nodes_created": _capture(r"^Nodes Created:\s*(\d+)$", output, None, int),
         "nodes_processed": _capture(r"^Nodes Processed:\s*(\d+)$", output, None, int),
         "nodes_pruned": _capture(r"^Nodes Pruned:\s*(\d+)$", output, None, int),
+        "nodes_pruned_before_lp": _capture(r"^Nodes Pruned Before LP:\s*(\d+)$", output, None, int),
+        "node_lp_solves_avoided_by_bound": _capture(r"^Node LP Solves Avoided by Bound:\s*(\d+)$", output, None, int),
         "lp_solves": _capture(r"^LP Solves:\s*(\d+)$", output, None, int),
         "lp_iterations": _capture(r"^LP Iterations:\s*(\d+)$", output, None, int),
+        "root_lp_iterations": _capture(r"^Root LP iterations:\s*(\d+)$", output, None, int),
+        "root_lp_method": _capture(r"^Root LP method:\s*([^\r\n]+)$", output, None),
+        "node_lp_iterations": _capture(r"^Node LP iterations:\s*(\d+)$", output, None, int),
+        "root_fractional_integer_variables": _capture(r"^Root fractional integer variables:\s*(\d+)$", output, None, int),
+        "feasibility_pump_lp_solves": _capture(r"^Feasibility Pump LP solves:\s*(\d+)$", output, None, int),
+        "feasibility_pump_iterations": _capture(r"^Feasibility Pump iterations:\s*(\d+)$", output, None, int),
+        "incumbent_updates": _capture(r"^Incumbent updates:\s*(\d+)$", output, None, int),
+        "root_rounding_heuristic_attempts": _capture(r"^Root rounding heuristic attempts:\s*(\d+)$", output, None, int),
+        "root_rounding_heuristic_accepted": _capture(r"^Root rounding heuristic accepted:\s*(\d+)$", output, None, int),
+        "first_incumbent_node": _capture(r"^First incumbent node:\s*(\d+)$", output, None, int),
+        "first_incumbent_time_ms": _capture(r"^First incumbent time ms:\s*([\d.eE+-]+)$", output, None, float),
+        "maximum_depth": _capture(r"^Maximum depth:\s*(\d+)$", output, None, int),
+        "peak_open_nodes": _capture(r"^Peak open nodes:\s*(\d+)$", output, None, int),
+        "cuts_generated": _capture(r"^Cuts generated:\s*(\d+)$", output, None, int),
+        "cuts_accepted": _capture(r"^Cuts accepted:\s*(\d+)$", output, None, int),
+        "cuts_rejected": _capture(r"^Cuts rejected:\s*(\d+)$", output, None, int),
+        "warm_starts_attempted": _capture(r"^Warm starts attempted:\s*(\d+)$", output, None, int),
+        "warm_starts_successful": _capture(r"^Warm starts successful:\s*(\d+)$", output, None, int),
+        "warm_starts_failed": _capture(r"^Warm starts failed:\s*(\d+)$", output, None, int),
+        "cold_fallbacks": _capture(r"^Cold fallbacks:\s*(\d+)$", output, None, int),
+        "cold_starts": _capture(r"^Cold starts:\s*(\d+)$", output, None, int),
+        "milp_model_preparation_time_ms": timings["milp_model_preparation_time_ms"],
+        "milp_root_lp_time_ms": timings["milp_root_lp_time_ms"],
+        "milp_root_lp_standardization_time_ms": timings["milp_root_lp_standardization_time_ms"],
+        "milp_root_lp_sparse_pricing_time_ms": timings["milp_root_lp_sparse_pricing_time_ms"],
+        "milp_root_lp_sparse_basis_solve_time_ms": timings["milp_root_lp_sparse_basis_solve_time_ms"],
+        "milp_root_lp_sparse_factorization_time_ms": timings["milp_root_lp_sparse_factorization_time_ms"],
+        "milp_feasibility_pump_time_ms": timings["milp_feasibility_pump_time_ms"],
+        "milp_branch_and_bound_time_ms": timings["milp_branch_and_bound_time_ms"],
+        "milp_node_selection_time_ms": timings["milp_node_selection_time_ms"],
+        "milp_node_model_update_time_ms": timings["milp_node_model_update_time_ms"],
+        "milp_node_lp_time_ms": timings["milp_node_lp_time_ms"],
+        "milp_node_lp_standardization_time_ms": timings["milp_node_lp_standardization_time_ms"],
+        "milp_node_lp_sparse_factorization_time_ms": timings["milp_node_lp_sparse_factorization_time_ms"],
+        "milp_branching_time_ms": timings["milp_branching_time_ms"],
+        "milp_pruning_time_ms": timings["milp_pruning_time_ms"],
+        "milp_total_solver_time_ms": timings["milp_total_solver_time_ms"],
         "primal_bound": _capture(r"^Primal Bound:\s*([^\r\n]+)$", output, None, float),
         "dual_bound": _capture(r"^Dual Bound:\s*([^\r\n]+)$", output, None, float),
         "absolute_gap": _capture(r"^Absolute Gap:\s*([^\r\n]+)$", output, None, float),
@@ -590,12 +664,17 @@ def parse_solver_output(output: str, total_ms: float) -> dict[str, Any]:
         "sparse_bland_fallback_triggered": _capture(r"^Sparse Bland fallback:\s*(YES|NO)$", output, None) == "YES",
         "backend": _capture(r"^Backend:\s*(.+)$", output, "cpu"),
         "backend_reason": _capture(r"^Backend reason:\s*(.+)$", output, None),
+        "build_compiler": _capture(r"^Build compiler:\s*([^\r\n]+)$", output, None),
+        "build_type": _capture(r"^Build type:\s*([^\r\n]+)$", output, None),
+        "build_mode": _capture(r"^Build mode:\s*([^\r\n]+)$", output, None),
         "method": _capture(r"^METHOD:\s*(.+)$", output, None) or _capture(r"^Method:\s*(.+)$", output, None),
         "selected_algorithm": _capture(r"^Selected algorithm:\s*(.+)$", output, None),
         "resolved_algorithm": _capture(r"^Resolved algorithm:\s*(.+)$", output, None),
         "message": _capture(r"^Message:[ \t]*([^\r\n]*)$", output, None),
         "convexity": _capture(r"^Hessian:\s*(.+)$", output, None),
     }
+    if status == "TIME_LIMIT":
+        status = "TIME_LIMIT_WITH_INCUMBENT" if metrics["objective"] is not None and verification == "PASS" else "TIME_LIMIT_NO_INCUMBENT"
     return {"status": status, "verification": verification, "timings": timings, "timing": timing, "metrics": metrics, "presolve": presolve, "variables": variables, "sparse_primal": sparse_variables is not None, "raw_log": output[-16000:]}
 
 
@@ -622,8 +701,11 @@ def _record_execution_trace(result: dict[str, Any], job: dict[str, Any], configu
         "resolved_algorithm": resolved,
         "resolved_backend": backend,
         "time_limit_seconds": configuration["time_limit_seconds"],
+        "solver_executable": configuration.get("solver_executable"),
+        "build_mode": metrics.get("build_mode"),
     }
     result["execution_trace"] = trace
+    configuration["build_mode"] = metrics.get("build_mode")
     metrics.update({"problem_type": problem_type, "model_size": model_size,
                     "user_selected_algorithm": selected, "resolved_algorithm": resolved,
                     "resolved_backend": backend, "time_limit_seconds": trace["time_limit_seconds"]})
@@ -637,6 +719,24 @@ def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | N
     timings = result.setdefault("timings", {})
     if backend_total_ms is not None:
         timings["backend_total_time_ms"] = backend_total_ms
+    milp_stages = {
+        "model_preparation": timings.get("milp_model_preparation_time_ms"),
+        "root_lp": timings.get("milp_root_lp_time_ms"),
+        "root_lp_standardization": timings.get("milp_root_lp_standardization_time_ms"),
+        "root_lp_sparse_pricing": timings.get("milp_root_lp_sparse_pricing_time_ms"),
+        "root_lp_sparse_basis_solve": timings.get("milp_root_lp_sparse_basis_solve_time_ms"),
+        "root_lp_sparse_factorization": timings.get("milp_root_lp_sparse_factorization_time_ms"),
+        "feasibility_pump": timings.get("milp_feasibility_pump_time_ms"),
+        "branch_and_bound": timings.get("milp_branch_and_bound_time_ms"),
+        "node_selection": timings.get("milp_node_selection_time_ms"),
+        "node_model_update": timings.get("milp_node_model_update_time_ms"),
+        "node_lp": timings.get("milp_node_lp_time_ms"),
+        "node_lp_standardization": timings.get("milp_node_lp_standardization_time_ms"),
+        "node_lp_sparse_factorization": timings.get("milp_node_lp_sparse_factorization_time_ms"),
+        "branching": timings.get("milp_branching_time_ms"),
+        "pruning": timings.get("milp_pruning_time_ms"),
+        "total_solver": timings.get("milp_total_solver_time_ms"),
+    }
     result["timing"] = {
         "parsing_ms": timings.get("parse_time_ms"),
         "model_preparation_ms": timings.get("model_preparation_time_ms"),
@@ -646,6 +746,7 @@ def _publish_timing_contract(result: dict[str, Any], backend_total_ms: float | N
         "postsolve_ms": timings.get("postsolve_time_ms"),
         "verification_ms": timings.get("verification_time_ms"),
         "backend_total_ms": timings.get("backend_total_time_ms"),
+        "milp_stages_ms": milp_stages,
     }
 
 
@@ -774,11 +875,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:8000", "http
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     try:
-        solver = str(_solver_path(prefer_cuda=True))
+        solver_path = _cpu_solver_path()
+        solver = str(solver_path)
         ready = True
     except FileNotFoundError as exc:
+        solver_path = None
         solver, ready = str(exc), False
-    return {"status": "ready" if ready else "degraded", "solver": solver}
+    build_mode = None
+    if solver_path is not None:
+        try:
+            info = subprocess.run([str(solver_path), "--build-info"], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=3, check=False)
+            build_mode = _capture(r"^Build mode:\s*([^\r\n]+)$", info.stdout, None)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        cuda_solver = str(_cuda_solver_path())
+    except FileNotFoundError:
+        cuda_solver = None
+    return {"status": "ready" if ready else "degraded", "solver": solver,
+            "cpu_solver": solver, "cpu_build_mode": build_mode, "cuda_solver": cuda_solver}
 
 
 @app.get("/api/device")
@@ -969,8 +1085,16 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         command.extend(["--max-iterations", str(configuration["max_iterations"])])
     if configuration["method"] == "milp":
         command.extend(["--max-nodes", str(configuration.get("max_nodes", 10000))])
+        if configuration.get("warm_start", False):
+            command.extend(["--warm-start", "1"])
+        milp_wall_limit = float(configuration.get("execution_time_limit_seconds", configuration.get("time_limit_seconds", 0)))
+        if milp_wall_limit > 0:
+            # Leave time for the C++ wrapper to verify and serialize the best
+            # incumbent before the subprocess watchdog expires.
+            command.extend(["--time-limit-ms", str(max(1.0, milp_wall_limit * 1000.0 - 1500.0))])
         if int(job["analysis"].get("variables", 0)) >= 50_000:
             command.append("--sparse-primal")
+    configuration["solver_executable"] = str(solver)
     execution_limit = float(configuration.get("execution_time_limit_seconds", configuration["time_limit_seconds"]))
     process: subprocess.Popen[str] | None = None
     try:
@@ -1021,8 +1145,15 @@ def _run_solver(job_id: str, job: dict[str, Any], configuration: dict[str, Any])
         _record_execution_trace(result, job, configuration)
         result["timings"]["model_preparation_time_ms"] = float(job.get("preparation_time_ms", 0.0))
         _publish_timing_contract(result, total_ms + float(job.get("preparation_time_ms", 0.0)))
-        result["status"] = "TIME_LIMIT"
-        result["metrics"]["message"] = f"The solver reached the configured {execution_limit:g}-second time limit."
+        if result["timings"].get("solver_time_ms") is None:
+            result["timings"]["solver_time_ms"] = total_ms
+            result["timings"]["solver_time_source"] = "python_process_wall_clock"
+        if result["metrics"].get("objective") is not None and result["verification"] == "PASS":
+            result["status"] = "TIME_LIMIT_WITH_INCUMBENT"
+            result["metrics"]["message"] = "A verified feasible solution was returned before the Python process time limit, but optimality was not proven."
+        else:
+            result["status"] = "TIME_LIMIT_NO_INCUMBENT"
+            result["metrics"]["message"] = "No verified feasible incumbent was found within the configured time budget."
     finally:
         with JOB_LOCK:
             job.pop("process", None)

@@ -56,6 +56,16 @@ static const char* buildType(){
 #endif
 }
 int main(int argc,char** argv){
+  const auto processStart=std::chrono::steady_clock::now();
+ if(argc>=2&&std::string(argv[1])=="--build-info"){
+#ifdef NDEBUG
+  constexpr const char* mode="RELEASE";
+#else
+  constexpr const char* mode="DEBUG";
+#endif
+  std::cout<<"Build compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nBuild mode: "<<mode<<"\n";
+  return 0;
+ }
  if(argc>=2&&std::string(argv[1])=="--device-info"){int device=0;for(int i=2;i+1<argc;++i)if(std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);std::cout<<cuda::deviceInfoText(device);return 0;}
  if(argc>=2&&std::string(argv[1])=="--select-backend"){
   try{
@@ -78,7 +88,8 @@ int main(int argc,char** argv){
    cuda::Context gpu(device);
    const bool fallback=selected==cuda::Backend::CUDA&&!gpu.available()&&requested==cuda::Backend::Auto;
    if(fallback)selected=cuda::Backend::CPU;
-   const char* reason=requested!=cuda::Backend::Auto?"An explicit backend override was requested.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":algorithm!="ipm"&&algorithm!="qp"&&algorithm!="pdhg"?"The selected algorithm has no production CUDA execution path; CPU was selected.":fallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":selected==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
+   const bool milpCpuOnly=algorithm=="milp"||algorithm=="cutting-plane"||algorithm=="feasibility-pump";
+   const char* reason=requested!=cuda::Backend::Auto?"An explicit backend override was requested.":milpCpuOnly?"MILP branch-and-bound and node LP relaxations run on CPU; CUDA is available but is not used for this solve.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":algorithm!="ipm"&&algorithm!="qp"&&algorithm!="pdhg"?"The selected algorithm has no production CUDA execution path; CPU was selected.":fallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":selected==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
    std::cout<<"Backend: "<<cuda::backendName(selected)<<"\nBackend reason: "<<reason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<algorithm<<"\nVariables: "<<cols<<"\nConstraints: "<<rows<<"\nNonzeros: "<<nnz<<"\n";
    return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 2;}
@@ -86,14 +97,18 @@ int main(int argc,char** argv){
  if(argc<3||std::string(argv[1])!="--input"){std::cerr<<"usage: --input <file> [--method revised-simplex|dual-simplex|ipm|pdhg|qp] [--max-iterations N (0 = unlimited)]\n";return 2;}
  try {
   std::size_t maxIterations=10000,maxNodes=10000;
+  double milpTimeLimitMs=0.0;
+  std::chrono::steady_clock::time_point inputDeadlineStorage;
+  const std::chrono::steady_clock::time_point* inputDeadline=nullptr;
   double presolveTimeBudgetMs=0.0;
   cuda::Backend requestedBackend=cuda::Backend::CPU;
   int device=0;
-  bool iterative=false,presolveEnabled=true,sparsePrimal=false,selectBackendOnly=false;
+  bool iterative=false,presolveEnabled=true,sparsePrimal=false,selectBackendOnly=false,milpWarmStart=false;
   std::string modelSize="UNKNOWN",selectedAlgorithm="revised-simplex";
   for(int i=3;i<argc;++i){
    if(i+1<argc&&std::string(argv[i])=="--max-iterations"){maxIterations=std::stoull(argv[i+1]);if(maxIterations==0)maxIterations=std::numeric_limits<std::size_t>::max();}
    if(i+1<argc&&std::string(argv[i])=="--max-nodes")maxNodes=std::stoull(argv[i+1]);
+   if(i+1<argc&&std::string(argv[i])=="--time-limit-ms")milpTimeLimitMs=std::max(0.0,std::stod(argv[i+1]));
    if(i+1<argc&&std::string(argv[i])=="--presolve-time-ms")presolveTimeBudgetMs=std::stod(argv[i+1]);
    if(i+1<argc&&std::string(argv[i])=="--backend"){std::string b=argv[i+1];if(b!="cpu"&&b!="cuda"&&b!="auto")throw std::invalid_argument("--backend must be cpu, cuda, or auto");requestedBackend=cuda::parseBackend(b);}
    if(i+1<argc&&std::string(argv[i])=="--device")device=std::stoi(argv[i+1]);
@@ -103,10 +118,29 @@ int main(int argc,char** argv){
    if(i+1<argc&&((std::string(argv[i])=="--method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"||std::string(argv[i+1])=="qp"))||(std::string(argv[i])=="--lp-method"&&(std::string(argv[i+1])=="ipm"||std::string(argv[i+1])=="pdhg"))))iterative=true;
    if(std::string(argv[i])=="--no-presolve")presolveEnabled=false;
    if(std::string(argv[i])=="--sparse-primal")sparsePrimal=true;
+   if(i+1<argc&&std::string(argv[i])=="--warm-start"){const std::string setting=argv[i+1];if(setting!="0"&&setting!="1")throw std::invalid_argument("--warm-start must be 0 or 1");milpWarmStart=setting=="1";}
+  }
+  if(selectedAlgorithm=="milp"&&milpTimeLimitMs>0.0){
+   inputDeadlineStorage=processStart+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double,std::milli>(milpTimeLimitMs));
+   inputDeadline=&inputDeadlineStorage;
   }
   auto parseStart=std::chrono::steady_clock::now();
-  Model model=parseInput(argv[2]);
-  double parseMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-parseStart).count();
+  Model model;
+  double parseMs=0.0;
+  try {
+   model=parseInput(argv[2],inputDeadline);
+  } catch(const InputTimeLimitExceeded& e) {
+   parseMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-parseStart).count();
+   if(selectedAlgorithm!="milp")throw;
+   std::cout<<std::setprecision(17)<<"Problem Type: MILP\nMethod: Branch-and-Bound\nMILP time limit ms: "<<milpTimeLimitMs
+    <<"\nStatus: TIME_LIMIT_NO_INCUMBENT\nSolve time ms: 0\nMILP Model Preparation time ms: "<<parseMs
+    <<"\nRoot LP time ms: 0\nRoot LP iterations: 0\nRoot LP method: N/A\nFeasibility Pump time ms: 0"
+    <<"\nFeasibility Pump LP solves: 0\nFeasibility Pump iterations: 0\nBranch-and-Bound time ms: 0"
+    <<"\nVerification time ms: N/A\nObjective: N/A\nPrimal Bound: N/A\nDual Bound: N/A\nAbsolute Gap: N/A\nRelative Gap: N/A"
+    <<"\nNodes Created: 0\nNodes Processed: 0\nNodes Pruned: 0\nLP Solves: 0\nLP Iterations: 0\nVerification: N/A\nMessage: "<<e.what()<<"\n";
+   return 0;
+  }
+  parseMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-parseStart).count();
   std::size_t nnz=0;for(const auto& c:model.constraints)nnz+=c.coefficients.size();
   // No checked-in record currently demonstrates a verified same-model
   // speedup for a production CUDA method. Keep AUTO on CPU until that evidence
@@ -121,7 +155,8 @@ int main(int argc,char** argv){
    if(requestedBackend==cuda::Backend::Auto)selectedBackend=cuda::Backend::CPU;
    else throw std::runtime_error("CUDA backend requested but no usable CUDA device is available");
   }
-  const char* backendReason=requestedBackend!=cuda::Backend::Auto?"An explicit backend override was requested.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":!iterative?"The selected algorithm has no production CUDA execution path; CPU was selected.":cudaFallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":policyBackend==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
+  const bool milpCpuOnly=selectedAlgorithm=="milp"||selectedAlgorithm=="cutting-plane"||selectedAlgorithm=="feasibility-pump";
+  const char* backendReason=requestedBackend!=cuda::Backend::Auto?"An explicit backend override was requested.":milpCpuOnly?"MILP branch-and-bound and node LP relaxations run on CPU; CUDA is available but is not used for this solve.":modelSize=="SMALL"?"Small model — CPU execution selected to avoid GPU overhead.":modelSize=="MEDIUM"?"Medium model — CPU retained until CUDA benefit is measured for this method and model size.":!iterative?"The selected algorithm has no production CUDA execution path; CPU was selected.":cudaFallback?"The CUDA build has no usable CUDA device; the C++ selector fell back to CPU.":policyBackend==cuda::Backend::CUDA?"Large workload suitable for GPU acceleration based on the measured backend policy.":"Large CUDA-compatible model, but no verified same-method CUDA speedup is recorded; CPU is preferred for this prototype.";
   if(selectBackendOnly){std::cout<<"Backend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\n";return 0;}
   if(gpu.available()&&selectedBackend==cuda::Backend::CUDA)cuda::Context::setDefault(&gpu);
   auto cls=classify(model);
@@ -130,7 +165,13 @@ int main(int argc,char** argv){
   double presolveMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-presolveStart).count();
   LPMethod method=LPMethod::RevisedSimplex;
   for(int i=3;i+1<argc;++i)if(std::string(argv[i])=="--method"){std::string x=argv[i+1];if(x=="dual-simplex")method=LPMethod::DualSimplex;else if(x=="ipm")method=LPMethod::IPM;else if(x=="pdhg")method=LPMethod::PDHG;}
-  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nResolved algorithm: "<<selectedAlgorithm<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\nC++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nPresolve time budget ms: "<<presolveTimeBudgetMs<<"\nPresolve termination: "<<red.terminationReason<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\nPRESOLVE\nFinal variables: "<<activeVariableCount(red.model)<<"\nFinal constraints: "<<activeConstraintCount(red.model)<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
+  std::cout<<std::setprecision(17)<<"MODEL "<<model.name<<"\nBackend: "<<cuda::backendName(selectedBackend)<<"\nBackend reason: "<<backendReason<<"\nModel size: "<<modelSize<<"\nSelected algorithm: "<<selectedAlgorithm<<"\nResolved algorithm: "<<selectedAlgorithm<<"\nBuild compiler: "<<buildCompiler()<<"\nBuild type: "<<buildType()<<"\n";
+#ifdef NDEBUG
+  std::cout<<"Build mode: RELEASE\n";
+#else
+  std::cout<<"Build mode: DEBUG\n";
+#endif
+  std::cout<<"C++ standard: "<<__cplusplus<<"\nPresolve: "<<(presolveEnabled?"ON":"OFF")<<"\nPresolve time budget ms: "<<presolveTimeBudgetMs<<"\nPresolve termination: "<<red.terminationReason<<"\nParse time ms: "<<parseMs<<"\nPresolve time ms: "<<presolveMs<<"\nVariables: "<<model.variables.size()<<"\nConstraints: "<<model.constraints.size()<<"\nNonzeros: "<<nnz<<"\nPRESOLVE\nFinal variables: "<<activeVariableCount(red.model)<<"\nFinal constraints: "<<activeConstraintCount(red.model)<<"\nPresolve reductions: "<<red.stats.boundTightenings+red.stats.fixedVariables+red.stats.eliminatedVariables+red.stats.redundantRows+red.stats.aggregations+red.stats.substitutions+red.stats.singletonReductions<<"\n";
   for(const auto& pass:red.passStats)std::cout<<"Presolve pass: "<<pass.pass<<" time_ms="<<pass.timeMs<<" variables="<<pass.variablesBefore<<"->"<<pass.variablesAfter<<" constraints="<<pass.constraintsBefore<<"->"<<pass.constraintsAfter<<" nnz="<<pass.nonzerosBefore<<"->"<<pass.nonzerosAfter<<" bound_tightenings="<<pass.boundTightenings<<" fixed_variables="<<pass.fixedVariables<<" substitutions="<<pass.substitutions<<" singleton_reductions="<<pass.singletonReductions<<" redundant_rows="<<pass.redundantRowsRemoved<<" reduction_percent="<<pass.percentageReduction<<"\n";
   std::cout<<std::flush;
   bool qp=false,relax=false;LPMethod lpMethod=LPMethod::RevisedSimplex;for(int i=3;i+1<argc;++i){if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="qp")qp=true;if(std::string(argv[i])=="--method"&&std::string(argv[i+1])=="lp-relaxation")relax=true;if(std::string(argv[i])=="--lp-method"){std::string z=argv[i+1];if(z=="dual-simplex")lpMethod=LPMethod::DualSimplex;else if(z=="ipm")lpMethod=LPMethod::IPM;else if(z=="pdhg")lpMethod=LPMethod::PDHG;}}
@@ -139,7 +180,12 @@ int main(int argc,char** argv){
   if(cutting){std::size_t cuts=100,its=100;for(int i=3;i+1<argc;++i){if(std::string(argv[i])=="--max-cuts")cuts=std::stoul(argv[i+1]);if(std::string(argv[i])=="--max-iterations")its=std::stoul(argv[i+1]);}auto s=CuttingPlaneSolver{1e-8,cuts,its}.solve(model);const char*status=s.status==CuttingStatus::OptimalInteger?"OPTIMAL_INTEGER":s.status==CuttingStatus::Infeasible?"INFEASIBLE":s.status==CuttingStatus::CutLimitReached?"CUT_LIMIT_REACHED":s.status==CuttingStatus::IterationLimitReached?"ITERATION_LIMIT_REACHED":s.status==CuttingStatus::LPSolveFailed?"LP_SOLVE_FAILED":"NUMERICAL_FAILURE";std::cout<<"Problem Type: MILP\nMethod: Cutting Plane\nCut Type: Gomory\nStatus: "<<status<<"\nIterations: "<<s.iterations<<"\nCuts Generated: "<<s.cutsGenerated<<"\nCuts Accepted: "<<s.cutsAccepted<<"\nCuts Rejected: "<<s.cutsRejected<<"\nLP Solves: "<<s.lpSolves<<"\nObjective: "<<s.objective<<"\nFractional Variables: "<<s.fractionalVariables<<"\nVerification: "<<(s.verified?"PASS":"FAIL")<<"\nPrimal:";for(double v:s.solution)std::cout<<" "<<v;std::cout<<"\n";printPrimalNames(model);return 0;}
   if (milp) {
       auto solveStart = std::chrono::steady_clock::now();
-      auto s = BranchAndBound{1e-8, maxNodes, maxIterations}.solve(model, lpMethod);
+      double remainingMILPTimeMs = milpTimeLimitMs;
+      if (milpTimeLimitMs > 0.0) {
+          const double elapsedBeforeMILP = std::chrono::duration<double, std::milli>(solveStart - processStart).count();
+          remainingMILPTimeMs = std::max(0.0, milpTimeLimitMs - elapsedBeforeMILP);
+      }
+      auto s = BranchAndBound{1e-8, maxNodes, maxIterations, remainingMILPTimeMs, milpWarmStart}.solve(model, lpMethod);
       if (auto* context = cuda::Context::defaultContext()) context->synchronize();
       double solveMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - solveStart).count();
       const bool hasCandidate = s.incumbentFound && !s.solution.empty();
@@ -164,21 +210,76 @@ int main(int argc,char** argv){
       }
       const char* status = s.status == MILPStatus::Optimal ? "OPTIMAL" :
           s.status == MILPStatus::Infeasible ? "INFEASIBLE" : s.status == MILPStatus::Unbounded ? "UNBOUNDED" :
+          s.status == MILPStatus::TimeLimit ? "TIME_LIMIT" : s.status == MILPStatus::TimeLimitNoIncumbent ? "TIME_LIMIT_NO_INCUMBENT" :
           s.status == MILPStatus::NodeLimit ? "NODE_LIMIT" :
           s.status == MILPStatus::IterationLimit ? "ITERATION_LIMIT" : "NUMERICAL_FAILURE";
       std::cout << "Problem Type: MILP\nMethod: Branch-and-Bound\nNode limit: "
           << (maxNodes == 0 ? "unlimited" : std::to_string(maxNodes))
+          << "\nMILP time limit ms: " << milpTimeLimitMs
           << "\nLP iteration limit per relaxation: "
           << (maxIterations == std::numeric_limits<std::size_t>::max() ? "unlimited" : std::to_string(maxIterations))
           << "\nStatus: " << status << "\nSolve time ms: " << solveMs
+          << "\nMILP Model Preparation time ms: " << parseMs + presolveMs
+          << "\nRoot LP time ms: " << s.rootLPTimeMs
+          << "\nRoot LP method: " << s.rootLPMethod
+          << "\nRoot LP iterations: " << s.rootLPIterations
+          << "\nRoot LP standardization time ms: " << s.rootLPStandardizationTimeMs
+          << "\nRoot LP sparse pricing time ms: " << s.rootLPSparsePricingTimeMs
+          << "\nRoot LP sparse basis solve time ms: " << s.rootLPSparseBasisSolveTimeMs
+          << "\nRoot LP sparse factorization time ms: " << s.rootLPSparseFactorizationTimeMs
+          << "\nRoot LP sparse refactorizations: " << s.rootLPSparseRefactorizations
+          << "\nRoot LP sparse pivots: " << s.rootLPSparsePivots
+          << "\nRoot fractional integer variables: " << s.rootFractionalVariables
+          << "\nFeasibility Pump time ms: " << s.feasibilityPumpTimeMs
+          << "\nFeasibility Pump LP solves: " << s.feasibilityPumpLPSolves
+          << "\nFeasibility Pump iterations: " << s.feasibilityPumpIterations
+          << "\nBranch-and-Bound time ms: " << s.branchAndBoundTimeMs
+          << "\nNode selection time ms: " << s.nodeSelectionTimeMs
+          << "\nNode model/update time ms: " << s.nodeModelUpdateTimeMs
+          << "\nNode LP time ms: " << s.nodeLPTimeMs
+          << "\nNode LP iterations: " << s.nodeLPIterations
+          << "\nNode LP standardization time ms: " << s.nodeLPStandardizationTimeMs
+#if defined(SOVEREIGN_PROFILE_DENSE_SIMPLEX)
+          << "\nNode LP dense setup/tableau time ms: " << s.nodeLPDenseSetupTimeMs
+          << "\nNode LP dense pricing time ms: " << s.nodeLPDensePricingTimeMs
+          << "\nNode LP dense ratio test time ms: " << s.nodeLPDenseRatioTestTimeMs
+          << "\nNode LP dense pivot time ms: " << s.nodeLPDensePivotTimeMs
+          << "\nNode LP dense warm basis rebuild time ms: " << s.nodeLPDenseWarmBasisRebuildTimeMs
+          << "\nNode LP dense solution recovery time ms: " << s.nodeLPDenseSolutionRecoveryTimeMs
+          << "\nNode LP dense verification time ms: " << s.nodeLPDenseVerificationTimeMs
+          << "\nNode LP dense cut generation time ms: " << s.nodeLPDenseCutTimeMs
+#endif
+          << "\nNode LP sparse factorization time ms: " << s.nodeLPSparseFactorizationTimeMs
+          << "\nBranching time ms: " << s.branchingTimeMs
+          << "\nPruning time ms: " << s.pruningTimeMs
+          << "\nIncumbent updates: " << s.incumbentUpdates
+          << "\nRoot rounding heuristic attempts: " << s.rootRoundingHeuristicAttempts
+          << "\nRoot rounding heuristic accepted: " << s.rootRoundingHeuristicAccepted
+          << "\nFirst incumbent node: " << s.firstIncumbentNode
+          << "\nFirst incumbent time ms: " << s.firstIncumbentTimeMs
+          << "\nMaximum depth: " << s.maxDepth
+          << "\nPeak open nodes: " << s.peakOpenNodes
+          << "\nCuts generated: " << s.cutsGenerated
+          << "\nCuts accepted: " << s.cutsAccepted
+          << "\nCuts rejected: " << s.cutsRejected
+          << "\nWarm starts attempted: " << s.warmStartsAttempted
+          << "\nWarm starts successful: " << s.warmStartsSuccessful
+          << "\nWarm starts failed: " << s.warmStartsFailed
+          << "\nCold fallbacks: " << s.coldFallbacks
+          << "\nCold starts: " << s.coldStarts
+          << "\nVerification internal time ms: " << s.verificationTimeMs
+          << "\nTotal MILP solver time ms: " << s.totalSolverTimeMs
           << "\nPostsolve time ms: N/A\nVerification time ms: " << (hasCandidate ? std::to_string(verificationMs) : "N/A")
           << "\nObjective: " << (hasCandidate ? std::to_string(s.objective) : "N/A")
           << "\nPrimal Bound: " << (hasCandidate ? std::to_string(s.primalBound) : "N/A")
-          << "\nDual Bound: " << (s.nodesCreated ? std::to_string(s.dualBound) : "N/A")
+          << "\nDual Bound: " << (s.hasDualBound ? std::to_string(s.dualBound) : "N/A")
           << "\nAbsolute Gap: " << (hasCandidate ? std::to_string(s.absoluteGap) : "N/A")
           << "\nRelative Gap: " << (hasCandidate ? std::to_string(s.relativeGap) : "N/A")
           << "\nNodes Created: " << s.nodesCreated << "\nNodes Processed: " << s.nodesProcessed
-          << "\nNodes Pruned: " << s.nodesPruned << "\nLP Solves: " << s.lpSolves
+          << "\nNodes Pruned: " << s.nodesPruned
+          << "\nNodes Pruned Before LP: " << s.nodesPrunedBeforeLP
+          << "\nNode LP Solves Avoided by Bound: " << s.nodeLPSolvesAvoidedByBound
+          << "\nLP Solves: " << s.lpSolves
           << "\nLP Iterations: " << s.totalLPIterations
           << "\nVerification: " << (s.verified && independentlyVerified ? "PASS" : hasCandidate ? "FAIL" : "N/A")
           << "\nMessage: " << s.message << "\n";

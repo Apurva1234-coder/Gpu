@@ -28,9 +28,28 @@ int main() {
     if (limited.incumbentFound) assert(limited.verified);
 
     const auto unlimited = BranchAndBound{1e-8, 0}.solve(model);
+    const auto warm = BranchAndBound{1e-8, 0, 10000, 0.0, true}.solve(model);
     assert(unlimited.status == MILPStatus::Optimal);
     assert(unlimited.verified);
     assert(unlimited.objective == 0.0);
+    assert(unlimited.rootLPTimeMs > 0.0);
+    assert(unlimited.rootLPIterations > 0);
+    assert(unlimited.branchAndBoundTimeMs > 0.0);
+    assert(unlimited.totalSolverTimeMs >= unlimited.rootLPTimeMs);
+    assert(unlimited.warmStartsAttempted == 0 && unlimited.coldStarts == unlimited.lpSolves);
+    assert(warm.status == MILPStatus::Optimal && warm.verified);
+    assert(warm.objective == unlimited.objective);
+    assert(warm.warmStartsAttempted > 0);
+    assert(warm.warmStartsSuccessful + warm.warmStartsFailed == warm.warmStartsAttempted);
+    assert(warm.coldStarts + warm.warmStartsSuccessful == warm.lpSolves);
+    assert(unlimited.peakOpenNodes > 0);
+    assert(unlimited.incumbentUpdates > 0);
+    assert(unlimited.verificationTimeMs > 0.0);
+
+    const auto timeLimited = BranchAndBound{1e-8, 100, 10000, 0.001}.solve(model);
+    assert(timeLimited.status == MILPStatus::TimeLimitNoIncumbent);
+    assert(!timeLimited.incumbentFound);
+    assert(timeLimited.message.find("time limit") != std::string::npos);
 
     const auto lpIterationLimited = BranchAndBound{1e-8, 100, 1}.solve(model);
     assert(lpIterationLimited.status == MILPStatus::IterationLimit);

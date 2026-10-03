@@ -6,9 +6,15 @@
 #include <cctype>
 #include <regex>
 #include <unordered_set>
+#include <chrono>
 namespace sovereign {
+class InputTimeLimitExceeded : public std::runtime_error {
+public:
+    InputTimeLimitExceeded() : std::runtime_error("MILP wall-clock time limit reached during input parsing") {}
+};
 inline double parseNumber(const std::string& s){try{return std::stod(s);}catch(...){throw std::runtime_error("invalid number: "+s);}}
-inline Model parseMPS(const std::string& path){
+inline Model parseMPS(const std::string& path,
+                      const std::chrono::steady_clock::time_point* deadline=nullptr){
     std::ifstream file(path); if(!file) throw std::runtime_error("cannot open input: "+path);
     struct RowInfo { std::string name; char type{}; };
     Model model;
@@ -26,7 +32,7 @@ inline Model parseMPS(const std::string& path){
         model.variables.push_back({id,id,name,VariableType::Continuous,0,INF,true});
         return id;
     };
-    while(std::getline(file,line)){ if(line.empty()||line[0]=='*') continue; std::istringstream in(line); std::vector<std::string> t; std::string s; while(in>>s)t.push_back(s); if(t.empty())continue; std::string h=t[0]; for(char&c:h)c=static_cast<char>(std::toupper(c));
+    while(std::getline(file,line)){ if(deadline&&std::chrono::steady_clock::now()>=*deadline)throw InputTimeLimitExceeded(); if(line.empty()||line[0]=='*') continue; std::istringstream in(line); std::vector<std::string> t; std::string s; while(in>>s)t.push_back(s); if(t.empty())continue; std::string h=t[0]; for(char&c:h)c=static_cast<char>(std::toupper(c));
         if(h=="NAME"){model.name=t.size()>1?t[1]:"MPS";section=h;continue;}
         // Section labels are standalone records. In particular, an RHS data
         // record commonly starts with the RHS set name "RHS"; treating every
@@ -52,6 +58,7 @@ inline Model parseMPS(const std::string& path){
         else if(section=="OBJSENSE"){std::string sense=t[0];for(char&c:sense)c=static_cast<char>(std::toupper(c));if(sense=="MAX"||sense=="MAXIMIZE")model.sense=Sense::Maximize;else if(sense=="MIN"||sense=="MINIMIZE")model.sense=Sense::Minimize;else throw std::runtime_error("unsupported MPS objective sense: "+sense);}
         else if(section=="BOUNDS"&&t.size()>=3){if(boundsSet.empty())boundsSet=t[1];if(t[1]!=boundsSet)continue;std::string type=t[0],name=t[2];double value=t.size()>3?parseNumber(t[3]):0;size_t id=ensureVariable(name);if(type=="BV"){model.variables[id].type=VariableType::Binary;model.variables[id].lower=0;model.variables[id].upper=1;}else if(type=="LI"){model.variables[id].type=VariableType::Integer;model.variables[id].lower=value;}else if(type=="UI"){model.variables[id].type=VariableType::Integer;model.variables[id].upper=value;}else if(type=="LO")model.variables[id].lower=value;else if(type=="UP")model.variables[id].upper=value;else if(type=="FX")model.variables[id].lower=model.variables[id].upper=value;else if(type=="FR")model.variables[id].lower=-INF;else if(type=="MI")model.variables[id].lower=-INF;else if(type=="PL")model.variables[id].upper=INF;else throw std::runtime_error("unsupported MPS bound type: "+type);}
     }
+    if(deadline&&std::chrono::steady_clock::now()>=*deadline)throw InputTimeLimitExceeded();
     if(model.name.empty()||rows.empty()||model.variables.empty())throw std::runtime_error("incomplete MPS input");
     for(std::size_t i=0;i<rows.size();++i){
         const auto& row=rows[i];
@@ -82,7 +89,8 @@ inline Model parseJSON(const std::string& path){
     std::string obj=section("objective");std::regex osec("\\\"objective\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch om;if(std::regex_search(s,om,osec))obj=om[1].str();std::regex kv("\\\"([^\"]+)\\\"\\s*:\\s*("+number+")");for(std::sregex_iterator i(obj.begin(),obj.end(),kv),e;i!=e;++i)for(size_t j=0;j<m.variables.size();++j)if(m.variables[j].name==(*i)[1])m.objective[j]=parseNumber((*i)[2]);
     std::regex cr("\\{\\s*\\\"name\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"coefficients\\\"\\s*:\\s*\\{([^}]*)\\}.*?\\\"operator\\\"\\s*:\\s*\\\"([^\"]+)\\\".*?\\\"rhs\\\"\\s*:\\s*("+number+")",std::regex::icase);for(std::sregex_iterator i(s.begin(),s.end(),cr),e;i!=e;++i){Constraint c;c.originalId=m.constraints.size();c.name=(*i)[1];c.relation=(*i)[3]=="<="?Relation::LessEqual:(*i)[3]==">="?Relation::GreaterEqual:Relation::Equal;c.rhs=parseNumber((*i)[4]);for(std::sregex_iterator j((*i)[2].first,(*i)[2].second,kv),z;j!=z;++j)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*j)[1])c.coefficients[n]=parseNumber((*j)[2]);m.constraints.push_back(c);}std::regex qsec("\\\"quadratic_terms\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch qmatch;if(std::regex_search(s,qmatch,qsec))for(std::sregex_iterator i(qmatch[1].first,qmatch[1].second,kv),e;i!=e;++i)for(size_t n=0;n<m.variables.size();++n)if(m.variables[n].name==(*i)[1])m.quadratic[n]=parseNumber((*i)[2]);std::regex bsec("\\\"bounds\\\"\\s*:\\s*\\{([^}]*)\\}");std::smatch bmatch;if(std::regex_search(s,bmatch,bsec)){std::regex bound("\\\"([^\"]+)\\\"\\s*:\\s*\\[\\s*(null|"+number+")\\s*,\\s*(null|"+number+")\\s*\\]",std::regex::icase);for(std::sregex_iterator i(bmatch[1].first,bmatch[1].second,bound),e;i!=e;++i)for(auto& v:m.variables)if(v.name==(*i)[1]){if((*i)[2]!="null")v.lower=parseNumber((*i)[2]);else v.lower=-INF;if((*i)[3]!="null")v.upper=parseNumber((*i)[3]);else v.upper=INF;}}m.rebuildMappings();return m;
 }
-inline Model parseInput(const std::string& path){
+inline Model parseInput(const std::string& path,
+                        const std::chrono::steady_clock::time_point* deadline=nullptr){
     std::ifstream f(path);if(!f)throw std::runtime_error("cannot open input: "+path);
     std::string line; bool json=false, mps=false;
     while(std::getline(f,line)) {
@@ -94,7 +102,7 @@ inline Model parseInput(const std::string& path){
         mps=(token=="NAME"||token=="ROWS"||token=="OBJSENSE");
         break;
     }
-    if(mps)return parseMPS(path);if(json)return parseJSON(path);return parseText(path);
+    if(mps)return parseMPS(path,deadline);if(json)return parseJSON(path);return parseText(path);
 }
 }
 
