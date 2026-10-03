@@ -1,288 +1,256 @@
 # Sovereign Optimization Solver
 
-A C++17 and Python optimization solver prototype with CPU algorithms and an optional NVIDIA CUDA numerical backend. It includes linear-programming methods, a convex quadratic-programming path, and foundational MILP tools. The C++ solver is the main optimization executable; the Python package provides model parsing, validation, classification, and presolve utilities.
+### A native C++17 prototype for LP, MILP, and convex QP
 
-This is an experimental project, not yet a production replacement for mature solvers. Use the limitations below when choosing models and interpreting results. Contributions and reproducible benchmarks are welcome.
+Sovereign is an optimization engine that owns its model parsing, presolve, solve, postsolve, and verification pipeline. It includes a native command-line solver, an optional CUDA numerical backend, reproducible benchmark tooling, and a web demonstration. It is an engineering prototype; it is not a production replacement for established solvers.
 
-## Capabilities
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white) ![LP](https://img.shields.io/badge/optimization-LP-176B87) ![MILP](https://img.shields.io/badge/optimization-MILP-176B87) ![Convex QP](https://img.shields.io/badge/optimization-convex%20QP-176B87) ![CMake](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake&logoColor=white)
 
-### Linear programming (LP)
+> **Prototype status:** LP, MILP, and a bounded diagonal-Hessian convex QP subset are implemented. Performance and model coverage are limited; see the benchmark evidence and limitations below.
 
-- Revised-simplex-style method (`revised-simplex`)
-- Dual simplex (`dual-simplex`)
-- Mehrotra interior-point method (`ipm`)
-- Linear presolve, solution checks, and MPS input
+## Contents
 
-Revised simplex uses a dense tableau for moderate models and switches to a sparse revised-simplex path when the estimated working matrix would be large. The sparse path keeps variable bounds and matrix rows sparse, avoiding the dense bound-row expansion that exhausted memory on supportcase6. It remains a prototype: difficult large LP relaxations may need many iterations, so this does not imply general-purpose large-MILP performance.
+- [Overview](#overview)
+- [Why Sovereign](#why-sovereign)
+- [Target / Ideal Solver Architecture](#target--ideal-solver-architecture)
+- [Current Implementation](#current-implementation)
+- [LP](#linear-programming)
+- [MILP](#mixed-integer-linear-programming)
+- [QP](#quadratic-programming)
+- [Presolve and verification](#presolve-and-verification)
+- [CPU and CUDA](#cpu-and-cuda)
+- [Verified benchmark snapshot](#verified-benchmark-snapshot)
+- [Benchmark methodology](#benchmark-methodology)
+- [Quick start](#quick-start)
+- [Web demonstration](#web-demonstration)
+- [Repository structure](#repository-structure)
+- [Testing](#testing)
+- [Current limitations](#current-prototype-limitations)
+- [Roadmap](#roadmap)
+- [Documentation](#documentation)
 
-### Numerical linear algebra (NLA)
+## Overview
 
-- Reusable vector operations and row-major dense matrix operations
-- CSR sparse matrix storage with `A*x` and `Aᵀ*x`
-- Partial-pivoting LU and SPD-checked Cholesky factorization
-- Dense linear and KKT solve interfaces with dimension, pivot, finiteness, and residual checks
-- Centralized numerical tolerances
+Optimization applications often depend on mature external solver ecosystems. Sovereign explores implementing the core optimization pipeline within a native C++ project: read a model, validate and simplify it, solve it, reconstruct the original variables, and independently check the result. External solvers are optional benchmark references; they are not used by the Sovereign native solve path.
 
-The LP, QP, and dual-simplex paths use the shared CPU linear-solve layer; revised simplex and Mehrotra IPM also use shared vector operations. CSR is available as a reusable primitive; dense working matrices remain in several non-sparse paths.
+The project provides a C++17 CLI as its authoritative solver interface. Python supports model analysis and benchmark orchestration. An optional FastAPI dashboard provides interactive model selection, solve telemetry, and stored benchmark reports.
 
-Automatic LP runs use no iteration or wall-clock time cap (`0` means unlimited), for both the sparsity-routed PDHG path and CPU Revised Simplex. The solver stops when it reaches its own terminal status; this does not guarantee that every unsupported, infeasible, unbounded, or numerically difficult input will yield an optimal solution. QP and MILP retain their separate automatic iteration/node budgets.
+## Why Sovereign
 
-### Quadratic programming (QP)
+The project is intended to make solver behavior inspectable: algorithm selection, CPU/CUDA backend, iteration or search telemetry, timing stages, and original-model verification are exposed in CLI or benchmark results. The benchmark runner records unsuccessful, unsupported, and timed-out cases so that the evidence remains reproducible.
 
-- QP classification and Hessian convexity check
-- Positive-definite, positive-semidefinite, and indefinite Hessian classification
-- Newton-barrier / interior-point path for supported convex QPs (`qp`)
-- Small diagonal-quadratic examples in `examples/`
+## Target / Ideal Solver Architecture
 
-The QP path is experimental. General cross-term Hessians, free-variable transformations, full QP presolve/postsolve, and comprehensive KKT verification are not yet supported across all model forms. Non-convex QPs are rejected; the solver does not optimize them.
+> This diagram represents the intended end-state architecture. Some components are future work, not implemented features. The current supported subset is shown separately below.
 
-### Mixed-integer linear programming (MILP)
-
-- LP relaxation, preserving binary bounds `[0, 1]`
-- Basic serial branch-and-bound (`milp`)
-- Gomory cutting-plane path for supported pure-integer rows (`cutting-plane`)
-- Feasibility Pump heuristic (`feasibility-pump`)
-
-Branch-and-bound uses best-bound search and pseudocost-scored branching. It has independent branch-node and per-relaxation LP iteration budgets; zero means unlimited for each. Reaching either budget returns the matching `NODE_LIMIT` or `ITERATION_LIMIT` status instead of misreporting infeasibility or optimality, and preserves any verified incumbent and available gap data.
-
-The MPS reader builds sparse constraint rows directly, and the web analyzer streams large MPS uploads without constructing a duplicate in-memory optimization model. Large MILP responses use sparse primal output and omit zero-valued variables from the normal page payload; CSV export streams the complete vector. `scripts/generate_million_sparse_milp.py <output.mps>` creates a synthetic 1,000,001-binary-variable ingestion and solve smoke model. That model exercises a sparse case with one interacting variable; it is not a MIPLIB benchmark or evidence of general million-variable MILP performance.
-
-Gomory cut generation accepts only rows that pass its integer-validity checks; mixed-integer Gomory cuts and broader cut families are not implemented. Feasibility Pump is a heuristic: failure to find a candidate is not proof of MILP infeasibility. Cutting planes and the heuristic are not integrated into branch-and-bound.
-
-## Repository layout
-
-```text
-cpp_solver/
-  include/       C++ model, LP, QP, presolve, and MILP components
-  src/main.cpp   Command-line application
-  tests/         C++ regression tests
-examples/        LP, QP, MILP, and MPS example inputs
-sovereign_solver/ Python parsing, validation, classification, and presolve package
-tests/           Python tests
+```mermaid
+flowchart TD
+    A[Real-world problem] --> B[Model input]
+    B --> C[Parsing and validation]
+    C --> D[Presolve]
+    D --> E[Problem classification]
+    E --> LP[LP: simplex / interior point]
+    E --> QP[QP: convexity / barrier / KKT]
+    E --> MILP[MILP: LP relaxation / branch-and-bound]
+    MILP -. target extensions .-> CUT[Cutting planes and primal heuristics]
+    MILP -. target extensions .-> PAR[Parallel search]
+    LP --> N[Numerical linear algebra]
+    QP --> N
+    MILP --> N
+    N --> X[CPU / optional GPU execution]
+    X --> S[Solve]
+    S --> V[Solution verification]
+    V --> P[Postsolve and original-space output]
+    P --> R[Results and telemetry]
+    R --> EVAL[Benchmarking and evaluation]
 ```
 
-## Primary interface: native CLI
+The target diagram includes method families and future extensions as an architectural direction. It does not imply that every listed algorithm or execution route is complete.
 
-Requirements: a C++17 compiler and CMake 3.16 or newer.
+## Current Implementation
 
-```bash
-cmake -S cpp_solver -B cpp_solver/build
+```mermaid
+flowchart TD
+    A[JSON / text / linear MPS / supported QPLIB] --> B[Native C++ parsing and validation]
+    B --> C[Classification and implemented presolve]
+    C -->|LP| L[Revised simplex / dual simplex / Mehrotra IPM / sparse PDHG]
+    C -->|MILP| M[Branch-and-bound with LP relaxations]
+    C -->|Convex QP subset| Q[Diagonal-Hessian Newton / barrier]
+    L --> D[Postsolve where applicable]
+    M --> D
+    Q --> D
+    D --> V[Original-model feasibility / integrality / KKT checks]
+    V --> O[CLI result and timing telemetry]
+    O --> R[Benchmark runner and saved reports]
+```
+
+| Capability | Current status |
+|---|---|
+| Native C++17 CLI | Implemented |
+| LP | Revised simplex, dual simplex, Mehrotra interior point, and sparse PDHG paths |
+| MILP | Serial branch-and-bound using LP relaxations; best-bound node selection and pseudocost-based branching |
+| Convex QP | Experimental Newton/barrier path for supported bounded variables and diagonal Hessians |
+| Presolve / postsolve | Implemented reductions and reconstruction for supported transformations |
+| Original-model checks | LP/MILP primal feasibility and integrality; QP KKT checks on the supported route |
+| CPU | Supported default execution backend |
+| CUDA | Optional acceleration for selected numerical operations and sparse LP/PDHG workloads |
+| Web demonstration | Optional FastAPI adapter and browser interface over the native CLI |
+| Benchmarking | Dataset runner, reference comparisons where available, JSON/CSV records, and verification |
+
+## Linear Programming
+
+The native LP code includes revised simplex, dual simplex, Mehrotra predictor-corrector interior point, and a sparse PDHG path for continuous LPs. Automatic routing currently uses sparsity to choose between PDHG and revised simplex; PDHG can use CUDA when that build and device are available. Unsupported or failed automatic PDHG attempts can fall back to revised simplex. The selectable method and backend are reported by the solver.
+
+These implementations are prototypes. A method being present does not mean it is competitive across all LP sizes or model structures.
+
+## Mixed-Integer Linear Programming
+
+MILP uses a serial branch-and-bound search with LP relaxations, best-bound node selection, and pseudocost-informed branching. Integer-safe presolve and postsolve support the current implementation. Results include incumbent/bound/gap and search telemetry where available, and a candidate is checked against the original model.
+
+Cut generation and Feasibility Pump exist as separate experimental paths. They are not integrated as a complete branch-and-cut engine. There is no parallel branch-and-bound implementation.
+
+## Quadratic Programming
+
+The supported QP route checks convexity and uses a Newton/barrier method. Current QP transformation supports convex minimization with diagonal Hessians and variables having finite bounds; general off-diagonal sparse Hessians and free variables are not supported. Original-model KKT verification is reported for the demonstrated QP route. The QP route measured below ran on CPU.
+
+## Presolve and verification
+
+Presolve applies implemented reductions such as bound tightening, fixed-variable handling, substitutions where supported, redundant-row checks, and singleton-row processing. The exact reductions depend on the model and integer-semantics mode; this is not the full target presolve list above.
+
+The solve pipeline restores supported reductions and evaluates the returned result against the original model. LP/MILP checks include primal feasibility and, for MILP, integrality. The demonstrated QP check includes primal, stationarity/dual, and complementarity residuals. A solver status by itself is not treated as proof that verification passed.
+
+## CPU and CUDA
+
+Sovereign is hybrid. Parsing, presolve, solver control, branch-and-bound, postsolve, and verification are CPU-managed. Optional CUDA code provides selected vector/matrix operations and sparse operations through cuBLAS, cuSPARSE, and cuSOLVER where the algorithm has a supported device path. It does **not** run the entire solver on the GPU: simplex, MILP branch-and-bound, and the measured QP solve are CPU paths. Small problems may remain on CPU to avoid device setup and transfer overhead.
+
+Build CUDA support only when the NVIDIA CUDA Toolkit and a compatible compiler are installed; see [the CUDA build script](scripts/build_cuda.bat) and the `SOVEREIGN_ENABLE_CUDA` option in [the CMake configuration](cpp_solver/CMakeLists.txt). The default CPU build has no CUDA requirement.
+
+## Verified benchmark snapshot
+
+The table below is copied from the checked-in [final benchmark JSON](benchmarks/results/FINAL_SOLVER_BENCHMARK_20261003.json) and its [methodology report](benchmarks/FINAL_SOLVER_BENCHMARK_REPORT.md). Timings are medians from repeated Release CLI runs on the recorded Windows/MSVC machine. Solver time is the solver's internal timing; CLI wall time also includes process startup and output capture. These are representative instances, not broad scaling guarantees.
+
+| Class / instance | Result | Objective | Verification | Median solver time | Median CLI wall |
+|---|---|---:|---|---:|---:|
+| LP · Netlib AFIRO | OPTIMAL · 16 iterations | -464.75314285714285 | PASS | 0.13135 ms | 16.6138 ms |
+| MILP · FLUGPL | OPTIMAL · 5,367 nodes | 1,201,500 | PASS | 269.2061 ms | 286.485 ms |
+| QP · QPLIB_9002 | OPTIMAL · 43 Newton iterations | 5,698,097,498.146622 | KKT PASS | 377.4874 ms | 455.0647 ms |
+
+The final report records AFIRO and FLUGPL objective agreement with the available HiGHS and Gurobi references. FLUGPL required far more search nodes than either reference (5,367 for Sovereign, 89 for HiGHS, and Gurobi solved it in presolve); the prototype is not shown to be competitive on MILP. No completed reference QP result was available, so no QP comparison is claimed. Gurobi's restricted license limited the QP model size, the HiGHS QP trial returned no solution, and CPLEX was not installed.
+
+The companion [LP/MILP optimization report](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md) records timed-out larger MILP cases and further controlled measurements. Those outcomes are retained as limitations rather than omitted. Do not compare timings with different timing scopes as a speed ranking.
+
+## Benchmark methodology
+
+- Final representative measurements use a Release MSVC build and repeated runs (10 LP runs; 5 MILP and QP runs).
+- Solver-only time and fresh native-process wall time are distinct and reported separately.
+- Solutions are independently evaluated against original-model constraints, bounds, integrality, and objective; QP includes KKT residual checks.
+- Reference comparisons use the same model where available, but solver clocks and API/wall scopes differ. The reports explicitly avoid cross-scope speed claims.
+- Dataset files are organized under `datasets/{lp,milp,qp}/{small,medium,large}`. The checked-in examples include Netlib-derived LP cases, FLUGPL/TIMTAB1 MILP fixtures, and QPLIB instances. Dataset provenance and unsupported cases are described in the benchmark reports; no datasets are downloaded automatically.
+
+See [benchmark documentation](benchmarks/README.md), [final report](benchmarks/FINAL_SOLVER_BENCHMARK_REPORT.md), [machine-readable final results](benchmarks/results/FINAL_SOLVER_BENCHMARK_20261003.json), and [LP/MILP optimization report](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md).
+
+## Quick start
+
+### Prerequisites
+
+- C++17 compiler
+- CMake 3.16 or newer
+- Python 3 for the test suite and optional web dashboard
+- NVIDIA CUDA Toolkit only for an optional CUDA build
+
+### Build the native Release CLI
+
+From the repository root:
+
+```powershell
+cmake -S cpp_solver -B cpp_solver/build -DCMAKE_BUILD_TYPE=Release
 cmake --build cpp_solver/build --config Release
 ```
 
-The executable is `cpp_solver/build/sovereign_presolve_cli` (Linux/macOS) or `cpp_solver/build/Release/sovereign_presolve_cli.exe` (Windows multi-configuration generators). On Windows with the repository's Release Ninja build it is `cpp_solver/build-route-cpu/sovereign_presolve_cli.exe`.
+The executable is typically `cpp_solver/build/sovereign_presolve_cli.exe` on a single-configuration Windows generator, or under `Release/` for a multi-configuration generator. This repository's benchmark build used `cpp_solver/build-route-cpu/sovereign_presolve_cli.exe`.
 
-The CLI is the primary demonstration and execution interface. It parses MPS, JSON, TXT, and supported QPLIB models, detects LP/QP/MILP, runs the selected native solver, and prints solver status, solution metrics, verification, and measured timings. The native QPLIB reader supports diagonal quadratic objectives with linear constraints, matching the current QP solver scope. It has no dependency on the web server, browser, FastAPI, or frontend assets. Example:
+### Solve representative models
 
 ```powershell
-cpp_solver\build-route-cpu\sovereign_presolve_cli.exe --input datasets\qp\small\QPLIB_9002.qplib --method qp
+# LP — AFIRO
+cpp_solver\build-route-cpu\sovereign_presolve_cli.exe --input datasets\lp\small\afiro.mps --method revised-simplex --backend cpu
+
+# MILP — FLUGPL
+cpp_solver\build-route-cpu\sovereign_presolve_cli.exe --input datasets\milp\small\flugpl.mps --method milp --backend cpu
+
+# Convex diagonal-Q QP — QPLIB_9002
+cpp_solver\build-route-cpu\sovereign_presolve_cli.exe --input datasets\qp\small\QPLIB_9002.qplib --method qp --backend cpu
 ```
 
-Use `--method revised-simplex` for LP or `--method milp` for MILP. The build also provides `--help`-style usage text when invoked without required arguments.
+Use the executable path produced by your selected CMake generator. Run the CLI without required arguments to print its usage. The QPLIB command demonstrates only the supported diagonal-Hessian QP subset.
 
-## Optional web dashboard
+## Web demonstration
 
-The website is optional and is not required to build or run the solver. It is a thin FastAPI adapter around the existing C++ executable. Its Python imports and frontend assets are used only when explicitly launching the dashboard or running web adapter tests. The central `webui/solver_policy.py` selects revised simplex for automatic continuous LP, Newton/Barrier for QP, and branch-and-bound for MILP.
+The web interface is an optional presentation and interaction layer around the native C++ CLI; it is not the solver implementation. The CLI remains usable without Python, FastAPI, or a browser.
 
-From the repository root on Windows:
+On Windows, install the web dependencies and launch the demo from the repository root:
 
 ```powershell
 python -m venv .venv-web
 .\.venv-web\Scripts\python.exe -m pip install -r webui\requirements.txt
-.\.venv-web\Scripts\python.exe -m uvicorn webui.app:app --host 127.0.0.1 --port 8000
+.\scripts\start_live_demo.ps1
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Build the C++ targets first. The dashboard supports the repository's `.mps`, `.json`, and `.txt` inputs, including Netlib EMPS/FMPS `.mps.txt` streams. EMPS is expanded in the job directory with the checked-in Netlib reference decoder before the existing parser and C++ solver run. Uploads are limited to 128 MB; expanded MPS output is limited to 96 MB. The adapter uses safe temporary files and subprocess argument arrays and enforces a configurable server-side time limit.
+Then open <http://127.0.0.1:8000/>. The script expects a built CLI at the path documented in [the live demo guide](docs/LIVE_DEMO.md); set `SOVEREIGN_SOLVER_EXECUTABLE` to use a different build. The dashboard can show stored benchmark reports without rerunning benchmark jobs.
 
-Available API routes:
+## Repository structure
 
 ```text
-GET  /api/health
-GET  /api/device
-GET  /api/capabilities
-POST /api/analyze
-POST /api/examples/{lp|qp|milp}
-POST /api/solve
-GET  /api/solve/{id}
-GET  /api/results/{id}
-GET  /api/benchmarks
+cpp_solver/       Native C++ engine, headers, CLI, and C++ tests
+datasets/         LP, MILP, and QP model inputs grouped by size
+examples/         Small project-format and MPS examples
+benchmarks/       Benchmark methodology, reports, results, and runner inputs
+sovereign_solver/ Python parsing, analysis, and benchmark tooling
+tests/            Python regression and adapter tests
+webui/            Optional FastAPI backend and browser application
+scripts/          Build, data, benchmark, and demo scripts
+docs/             Live demo setup and rehearsal notes
+README.md         Project overview and verified quick start
 ```
 
-### Timing and telemetry
+## Testing
 
-Every solve reports measured stage durations in milliseconds. The API keeps the raw values in `timings` for backwards compatibility and also returns the canonical `timing` object:
+Run the C++ test suite from a configured build directory and Python tests from the repository root:
 
-```ts
-timing: {
-  parsing_ms: number | null,
-  model_preparation_ms: number | null,
-  presolve_ms: number | null,
-  solver_ms: number | null,
-  postsolve_ms: number | null,
-  verification_ms: number | null,
-  backend_total_ms: number | null
-}
-```
-
-- `solver_ms` is measured around the selected optimization algorithm itself. It excludes parsing, model preparation, presolve, postsolve, verification, and browser/network time. CUDA execution synchronizes the active stream before the timer stops.
-- `parsing_ms`, `presolve_ms`, `postsolve_ms`, and `verification_ms` come from their measured execution stages. A stage that did not run is `null`/shown as `—` rather than filled with an estimate.
-- `model_preparation_ms` records backend-side model preparation performed before the C++ solve process. `backend_total_ms` measures backend processing and orchestration, including preparation and the solver request; it is not used as a substitute for solver time.
-- A solver timeout or external process kill preserves the measured backend elapsed time. `solver_ms` remains unavailable if the solver process did not return its internal timing.
-- The Sovereign solver duration is the same in solve results, benchmark comparisons, and recorded benchmark JSON. The benchmark also stores the raw millisecond values; the UI displays milliseconds below 1,000 ms and seconds at or above 1,000 ms.
-
-Run the C++ tests with:
-
-```bash
+```powershell
 ctest --test-dir cpp_solver/build --output-on-failure
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Run the Python tests from the repository root with:
+The checked-in final benchmark record reports 10/10 C++ CTest targets and 59/59 Python tests at that report's source revision. This final presentation pass reruns the current Python suite; test counts can change as tests are added. Build and test artifacts are not benchmark results.
 
-```bash
-python -m unittest discover -s tests -v
-```
+## Current prototype limitations
 
-## Run the C++ CLI
+- The QP solver supports diagonal Hessians only and does not support free variables or general sparse off-diagonal quadratic terms.
+- Medium and large QP coverage is not validated; QPLIB_8906 is rejected due to off-diagonal Hessian entries.
+- MILP scaling is limited. FLUGPL needed 5,367 nodes; larger recorded instances timed out without an incumbent.
+- Presolve, cutting planes, and heuristics do not constitute a complete production branch-and-cut system.
+- CUDA accelerates selected numerical paths only. The documented MILP and QP measurements ran on CPU.
+- The benchmark evidence is a small set of representative instances, not a comprehensive performance comparison.
+- No project license file is present. Confirm licensing before redistribution.
 
-Examples below use the Linux executable path; substitute the Windows `.exe` path when needed.
+## Roadmap
 
-```bash
-# LP with revised simplex (default)
-./cpp_solver/build/sovereign_presolve_cli --input examples/lp.json --method revised-simplex
+- General sparse off-diagonal QP Hessians and broader QP model support
+- Stronger MILP cuts and primal heuristics integrated into branch-and-bound
+- Fewer branch-and-bound nodes, stronger relaxations, and broader MILP validation
+- Wider GPU-resident numerical paths and measured CPU/GPU comparisons
+- More independent benchmark coverage and numerical robustness work
+- Parallel branch-and-bound exploration
 
-# LP with dual simplex or interior point
-./cpp_solver/build/sovereign_presolve_cli --input examples/afiro.mps --method dual-simplex
-./cpp_solver/build/sovereign_presolve_cli --input examples/afiro.mps --method ipm
+These are future directions, not current capabilities.
 
-# Convex QP analysis and solve attempt
-./cpp_solver/build/sovereign_presolve_cli --input examples/convex_qp.json --method qp
+## Documentation
 
-# MILP LP relaxation, choosing the LP method
-./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method lp-relaxation --lp-method revised-simplex
-
-# Basic branch-and-bound
-./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method milp --lp-method revised-simplex
-
-# Branch-and-bound node budget (0 means unlimited)
-./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method milp --max-nodes 100000
-
-# Gomory cutting-plane loop
-./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method cutting-plane --max-cuts 100 --max-iterations 100
-
-# Feasibility Pump heuristic
-./cpp_solver/build/sovereign_presolve_cli --input examples/milp_relaxation.json --method feasibility-pump --max-fp-iterations 100 --fp-tolerance 1e-7
-```
-
-The CLI prints model and presolve information before method-specific output. `--lp-method` applies to MILP relaxation and branch-and-bound. The cutting-plane path currently uses revised simplex.
-
-## Input formats
-
-### JSON
-
-The C++ parser accepts the project's simple JSON model format. Here is a small MILP example:
-
-```json
-{
-  "name": "Small MILP",
-  "objective_sense": "minimize",
-  "variables": [
-    {"name": "x", "type": "integer"},
-    {"name": "y", "type": "binary"}
-  ],
-  "objective": {"x": -3, "y": -2},
-  "constraints": [
-    {"name": "capacity", "coefficients": {"x": 2, "y": 2}, "operator": "<=", "rhs": 3}
-  ]
-}
-```
-
-Variable types are `continuous`, `integer`, or `binary`. The C++ JSON reader is intentionally lightweight; use the supplied examples as the format reference. JSON bound-field support is limited, so use the text format or MPS bounds where supported.
-
-Diagonal Hessian entries can be supplied as `quadratic_terms`, for example `{"x": 2}`. The C++ QP solver interprets this as `Qxx = 2` in `1/2 xᵀQx + cᵀx`. The separate generic objective evaluator currently uses the stored diagonal value as the coefficient of `x²`, so do not assume those two paths report the same quadratic objective for arbitrary coefficients. This convention mismatch is a known limitation; cross terms are not generally supported by the QP solve path.
-
-### Plain text
-
-The Python parser accepts simple text models such as:
-
-```text
-name: Production plan
-objective: maximize 40x + 60y
-var x: continuous
-var y: integer
-constraint: labor: 2x + 4y <= 100
-constraint: material: 3x + 2y <= 80
-bound: x [0, inf]
-```
-
-### MPS
-
-The project includes MPS examples such as `examples/afiro.mps`, `examples/adlittle.mps`, and `examples/agg.mps`. The Python MPS reader supports common linear sections and integer markers. The C++ reader supports a basic linear MPS subset. MPS quadratic sections are not supported.
-
-## Python model analysis
-
-The Python command parses and classifies a model and can run Python presolve; it does not call the C++ optimization algorithms:
-
-```bash
-python -m sovereign_solver.cli --input examples/lp.json --presolve
-```
-
-## Example data and benchmarking
-
-Small LP, QP, and MILP fixtures are included for functional tests. The Netlib-derived MPS files are useful parser and solver smoke tests. The streaming benchmark runner below provides controlled measurements when run with fixed inputs, hardware, tolerances, and stopping criteria; the included smoke data is not sufficient to claim comparative performance.
-
-### Streaming benchmark runner
-
-The benchmark runner processes one local instance at a time, calls the existing C++ solver CLI, and verifies every returned primal against the original model, including variable bounds, row feasibility, integrality, and objective value. It records unsupported inputs and failures instead of counting them as successful solves. The Python runner is independent from the solver engine; optional HiGHS comparison uses `highspy` only when installed.
-
-Build first, then run:
-
-```powershell
-python -m sovereign_solver.benchmark --dataset netlib --input benchmarks/netlib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --tier quick --time-limit 60
-python -m sovereign_solver.benchmark --dataset miplib --input benchmarks/miplib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --limit 10 --method milp --compare-highs --compare-presolve
-python -m sovereign_solver.benchmark --dataset qplib --input benchmarks/qplib --solver cpp_solver/build/Release/sovereign_presolve_cli.exe --method qp --compare-backends
-```
-
-Tiers are `quick` (up to 10 files), `standard` (up to 50), and `full` (all discovered files); `--limit N` overrides a tier. The default time limit is 60 seconds per solver invocation. Results go to `results/` by default and can be redirected with `--output-dir`. Useful options include `--method auto|revised-simplex|dual-simplex|ipm|pdhg|qp|milp|lp-relaxation|cutting-plane|feasibility-pump`, `--backend cpu|cuda|auto`, `--objective-tol`, `--feasibility-tol`, `--compare-highs`, `--compare-presolve`, and `--compare-backends`. LP methods are passed as `--lp-method` within the existing branch-and-bound path for MILPs.
-
-Suggested local input layout:
-
-```text
-benchmarks/
-  netlib/{small,medium,large}/       # MPS LP instances
-  miplib/{small,medium,hard}/        # MPS MILP instances
-  qplib/{convex,semidefinite,nonconvex}/
-  mittelmann/{lp,qp,other}/
-results/                             # generated output; keep inputs separate
-```
-
-Supported model files are this project's JSON/text models and the implemented linear MPS subset (`.mps`). Gzip-compressed linear MPS (`.mps.gz`) is supported by the benchmark parser. The web dashboard also accepts Netlib EMPS/FMPS `.mps.txt` inputs and expands them with the checked-in Netlib reference decoder. The current QP interface supports diagonal quadratic objectives in project JSON/text models; standard QPLIB and quadratic MPS encodings are not parsed and are recorded as `UNSUPPORTED` with the parser reason. Mittelmann instances are only run when they use a compatible supported input. The workspace currently contains a local standard-MPS AFIRO fixture, compressed Netlib EMPS files, and gzip MIPLIB MPS files; it contains no `.qplib` instances or compatible Mittelmann inputs. No datasets are downloaded automatically. Place locally obtained files under the corresponding family folders; do not put generated results under benchmark input trees.
-
-The runner emits class-specific LP/MILP/QP CSV and JSON, an all-instance dataset JSON, `external_solver_comparison.csv/json`, `cpu_gpu_benchmark.csv/json`, `presolve_benchmark.csv/json`, `numerical_robustness.csv/json`, and `benchmark_summary.md`. HiGHS is optional and currently compared on LP/MILP; absent HiGHS is recorded as `NOT_AVAILABLE`. CUDA is optional; unsupported methods are labeled and CPU execution continues. CUDA event timings and memory-per-process are not exposed by the current solver CLI, so those fields remain empty and are not inferred from wall-clock time.
-
-Examples available in the repository can be benchmarked immediately with `--dataset examples --input examples`. For example, the included `afiro.mps`, `lp.json`, and `milp_relaxation.json` permit a small smoke run. A timeout is recorded as `TIME_LIMIT`; an optimal status counts as a successful result only after original-model verification passes.
-
-## Current scope
-
-- Revised and dual simplex, presolve, MILP search, cut generation, and solver control logic remain CPU implementations. PDHG supports continuous LPs and can keep sparse matrices and iteration vectors resident on CUDA. Automatic LP routing branches on sparsity alone: at least 90% sparsity selects PDHG (CUDA when available); lower sparsity selects CPU Revised Simplex. Automatic PDHG failures fall back to Revised Simplex.
-- No MIQP, nonlinear optimization, branch-and-cut integration, advanced MILP cuts, parallel search, or learned methods.
-- Solver methods are prototypes; numerical robustness and scalability need further work.
-- A heuristic result is not an optimality certificate. Interpret each method's status and verification output accordingly.
-
-## License
-
-No license file is currently included. Add a license before redistributing or reusing the project outside its intended scope.
-## Optional CUDA backend
-
-The CPU backend remains the default and does not require CUDA. Configure the optional NVIDIA backend with a CUDA Toolkit installation:
-
-```powershell
-cmake -S cpp_solver -B build-cuda -DSOVEREIGN_ENABLE_CUDA=ON
-cmake --build build-cuda --config Release
-build-cuda\sovereign_presolve_cli.exe --device-info
-```
-
-The backend provides a reusable CUDA context/stream, cuBLAS AXPY/dot/dense GEMV, cuSPARSE CSR SpMV, and cuSOLVER dense LU solves. Dense KKT solves used by LP/QP interior-point methods run through cuSOLVER when CUDA is selected. PDHG's sparse matrix and iteration vectors stay on the device; primal and dual vectors are copied to the host periodically for residual checks and final independent verification.
-
-Use `--backend cpu|cuda|auto` on solver runs. `cpu` is the default. `cuda` requires a working CUDA build and device, and `--device N` selects the NVIDIA device. `auto` selects CUDA for sufficiently large repeated interior-point workloads and sparse PDHG LP runs; simplex and other CPU-only methods stay on CPU. The CLI prints the selected numerical backend. A CUDA-enabled build requires a C++17 compiler supported by the installed CUDA Toolkit, CMake 3.16+, and NVIDIA cuBLAS, cuSPARSE, and cuSOLVER libraries.
-
-If CUDA is unavailable, configure without `SOVEREIGN_ENABLE_CUDA`; the same CLI reports `CUDA Available: NO` and all existing CPU functionality remains available.
+- [Benchmark runner and dataset notes](benchmarks/README.md)
+- [Final verified benchmark report](benchmarks/FINAL_SOLVER_BENCHMARK_REPORT.md)
+- [LP/MILP optimization report and timeout evidence](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md)
+- [AFIRO LP baseline](benchmarks/LP_SMALL_FULL_BENCHMARK_20261003.md)
+- [QPLIB_9002 QP baseline and fix](benchmarks/QP_SMALL_BASELINE_AND_FIX_20261003.md)
+- [Live demo setup and rehearsal](docs/LIVE_DEMO.md)
+- [Native solver source](cpp_solver/)
