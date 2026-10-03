@@ -247,8 +247,6 @@ These are future directions, not current capabilities.
 
 ## Documentation
 
+- [All project audits and benchmark reports in one document](PROJECT_REPORTS.md)
 - [Dataset-by-dataset results for every checked-in model](benchmarks/DATASET_BENCHMARK_REPORT.md)
 - [Benchmark guide, input provenance, and report index](benchmarks/README.md)
-- [Final verified benchmark report](benchmarks/FINAL_SOLVER_BENCHMARK_REPORT.md)
-- [LP/MILP optimization results and timeout evidence](benchmarks/LP_MILP_FINAL_OPTIMIZATION_REPORT.md)
-- [LP algorithm and presolve audit archive](benchmarks/LP_AUDIT.md)

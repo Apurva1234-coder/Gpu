@@ -1,5 +1,7 @@
 # Benchmarks and datasets
 
+For a single file containing the complete text of all project audit and benchmark reports, see [PROJECT_REPORTS.md](../PROJECT_REPORTS.md). This index remains the short guide to inputs and individual source records.
+
 Use the [dataset-by-dataset benchmark report](DATASET_BENCHMARK_REPORT.md) as the entry point for every model under `datasets/`. It identifies the input, model dimensions where available, recorded solve outcome, verification, timing scope, and detailed evidence. A dataset file is not automatically a successful benchmark: unsupported inputs, timeouts, and cases without a solver run are labeled explicitly.
 
 ## Reports
